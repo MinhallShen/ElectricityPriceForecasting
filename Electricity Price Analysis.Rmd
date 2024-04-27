@@ -1,0 +1,2882 @@
+---
+title: 'STAT443 Group 4 Project: Electricity Price in US City'
+author: "Aaron Abraham, Diana Constantinescu, Lisa Kelly, Minhall Shen"
+date: "Winter 2024"
+output: pdf_document
+---
+
+```text
+
+
+
+
+
+```
+Contributions:
+
+Minhall Shen: Exploratory Data Analysis + Combination + Conclusion
+
+Diana Constantinescu: Regression
+
+Lisa Kelly: Smoothing Methods + Combination
+
+Aaron Abraham: Box-Jenkins + Combination
+
+\newpage
+
+\centering
+
+\raggedright
+
+\clearpage
+
+\tableofcontents
+
+
+
+\newpage
+
+
+# Motivation
+In our project for STAT443, we will be exploring the monthly average electricity 
+usage in kilowatt-hours in a U.S. city from November 1978 to January 2024 and
+attempting to forecast and predict the monthly average electricity usage over
+the next 24 months. We will leverage various forecasting and diagnostics 
+techniques that were taught throughout the course to create a robust prediction.
+
+This time series dataset about electricity prices stood out to us because it is
+a real world application that allows us to not only predict numbers and prices,
+but apply the knowledge we learned in the course to derive applicable insights
+affecting both the energy industry and homeowners alike. The data clearly 
+suggests that there has been an increase in electricity prices throughout the
+years and we hope to provide analysis and predictions to help both homeowners 
+and those in the energy industry understand the current and future patterns of
+electricity prices.
+
+This dataset was obtained from FRED and can be found here: 
+https://fred.stlouisfed.org/series/APU000072610. In the dataset, there are two 
+columns, the date in the format YYYY-MM-DD, where the date is always the first
+of its respective month, and the cost of electricity per kilowatt-hour in U.S.
+dollars for that month. The data is not seasonally adjusted. 
+
+
+# Exploratory Data Analysis
+
+Let's look at the time series of our dataset
+
+```{r, echo=FALSE, out.width="60%"}
+options(warn=-1)
+library(ggplot2)
+data <- read.csv("Data_Group4.csv")
+data$DATE <- as.Date(data$DATE)
+names(data)[names(data) == "APU000072610"] <- "PRICE"
+data$PRICE <- as.numeric(data$PRICE)
+#impute missing data
+data$PRICE[83] <- (data$PRICE[82] + data$PRICE[84])/2
+ggplot(data, aes(DATE, PRICE)) +
+  geom_point(size=1) +
+  labs(title="Time Series of Electricity Price in the US", x="year", y="Price (cents)") +
+  labs(caption="Fig 1: Time series of electricity price per kilowatt hour in the US") +
+  theme(plot.caption=element_text(hjust=0.5))
+
+```
+
+There is a missing value in the 83rd month of the dataset, we impute the NA with
+the mean of its direct neighbours (82nd and 84th months)
+
+## Constant Mean and Variance
+
+Let's split the graph up and see if we have constant mean and variance.
+
+```{r, echo=FALSE}
+n <- 109
+nr <- nrow(data)
+data_split5 <- split(data, rep(1:ceiling(nr/n), each=n, length.out=nr))
+
+vars5 <- c(var(data_split5$`1`$PRICE, na.rm=TRUE),
+          var(data_split5$`2`$PRICE),
+          var(data_split5$`3`$PRICE),
+          var(data_split5$`4`$PRICE),
+          var(data_split5$`5`$PRICE))
+
+means <- c(mean(data_split5$`1`$PRICE, na.rm=TRUE),
+          mean(data_split5$`2`$PRICE),
+          mean(data_split5$`3`$PRICE),
+          mean(data_split5$`4`$PRICE),
+          mean(data_split5$`5`$PRICE))
+
+date_splits5 <- c(data_split5$`1`$DATE[1],
+                  data_split5$`2`$DATE[1],
+                  data_split5$`3`$DATE[1],
+                  data_split5$`4`$DATE[1],
+                  data_split5$`5`$DATE[1],
+                  tail(data_split5$`5`$DATE,n=1))
+```
+
+```{r, echo=FALSE}
+n <- 55
+nr <- nrow(data)
+data_split10 <- split(data, rep(1:ceiling(nr/n), each=n, length.out=nr))
+
+vars10 <- c(var(data_split10$`1`$PRICE, na.rm=TRUE),
+            var(data_split10$`2`$PRICE, na.rm=TRUE),
+            var(data_split10$`3`$PRICE),
+            var(data_split10$`4`$PRICE),
+            var(data_split10$`5`$PRICE),
+            var(data_split10$`6`$PRICE),
+            var(data_split10$`7`$PRICE),
+            var(data_split10$`8`$PRICE),
+            var(data_split10$`9`$PRICE),
+            var(data_split10$`10`$PRICE))
+```
+
+
+
+From the time series, we see that we may not have constant variance. Let's do
+Fligner-Killeen tests to make sure. See the appendix for exact figures.
+
+After performing a Fligner-Killeen test, wee see that the p-value << 0.05, so 
+there is strong evidence against homogeneity of variances in our time series. 
+We'll try to address this with some transformations.
+
+```{r, echo=FALSE, out.width="60%"}
+seg = c( rep(1:4, each=109), rep(5, 107))
+ft <- c()
+for (i in seq(-2, 2, by=0.1)) {
+    if (i==0) {
+        ft <- c(ft, fligner.test(log(data$PRICE), seg)$p.value)
+    } else{
+      ft <- c(ft, fligner.test((data$PRICE)^i, seg)$p.value)
+    }
+}
+
+plot(seq(-2, 2, by=0.1), ft, main="P values of Fligner-Killeen Tests on Power Transformations",
+                             xlab="power",
+                             ylab="p")
+mtext("Fig 3: plot of the p-values for Fligner-Killeen Tests for powers from -2 to 2", side=1, line=4)
+fig.dim=c(8,4)
+```
+
+From this graph, we see that the Fligner-Killeen test still yields very low
+p-values for all of the powers, so we are unable to get rid of the non-constant
+variance. Next up, we'll look at the electricity prices for each month.
+
+```{r, include=FALSE}
+#install.packages("lubridate")
+library(lubridate)
+data$MONTH <- month(data$DATE)
+avg_price_month = aggregate(data$PRICE, list(data$MONTH), FUN=mean, na.rm=TRUE)
+ggplot(data, aes(x=MONTH, y=PRICE)) +
+  geom_bar(stat="summary", fun.y=mean, fill = "#FF6666") +
+  labs(title="Mean Electricity Price by Month", x="Month", y="Mean Price") +
+  scale_x_continuous(breaks = seq(1, 12, by = 1))+
+  labs(caption="Fig 4: Average electricity price for all the months with a 95% confidence interval") +
+  theme(plot.caption=element_text(hjust=0.5))
+```
+
+## Seasonality and Trend
+
+Next, let's explore seasonality and trend. Looking at the ACF, we see that there 
+is clearly a decreasing linear trend, with potentially some seasonality. 
+Performing a one time differencing, we see that there is a seasonality of 12. 
+
+```{r, echo=FALSE, fig.dim=c(6,3)}
+par(mfrow=c(1,2))
+acf(data$PRICE, main="ACF Plot of Price")
+mtext("Fig 4: ACF Plot of price data", side=1, line=4, cex=0.8)
+acf(diff(data$PRICE), main="ACF Plot of diff(Price)")
+mtext("Fig 5: ACF Plot with one time difference", side=1, line=4, cex=0.8)
+```
+
+```{r, include=FALSE}
+ts <- ts(data$PRICE, start=1978 + 10/12, frequency=12)
+plot(ts, main="Electricity Price in the US", xlab="Time",
+     ylab="Electricity Price", xlim=c(1978, 2025))
+```
+
+```{r, include=FALSE}
+library(car) # for qqplot
+library(glmnet) # for regularized regression
+library("randtests") # for randomness test
+```
+
+```{r, include=FALSE}
+#data <- read.csv("C:/Users/diana/Desktop/Daii/School/UWaterloo/4B/STAT 443/Project (group submission)/Data_Group4.csv")
+data$DATE <- as.Date(data$DATE)
+names(data)[names(data) == "APU000072610"] <- "PRICE"
+data$PRICE <- as.numeric(data$PRICE)
+#impute missing data
+data$PRICE[83] <- (data$PRICE[82] + data$PRICE[84])/2
+```
+
+```{r, include=FALSE}
+#install.packages("lubridate")
+library(lubridate)
+data$MONTH <- month(data$DATE)
+avg_price_month = aggregate(data$PRICE, list(data$MONTH), FUN=mean, na.rm=TRUE)
+ggplot(data, aes(x=MONTH, y=PRICE)) +
+  geom_bar(stat="summary", fun.y=mean, fill = "#FF6666") +
+  labs(title="Mean Electricity Price by Month", x="Month", y="Mean Price") +
+  scale_x_continuous(breaks = seq(1, 12, by = 1))
+```
+# Regression
+In this section, we will try regression models up to degree 15 on the data.
+We decided to use orthogonal polynomials to combat the multicolinearity problem.
+Details for this choice can be found in the appendix under "Appendix-Regression
+-> Choice of orthogonal polynomials". Figures [x] and [x] are relevant.
+
+Additionally, from the explanatory analysis we determined that this data has
+trend and seasonality (with period 12) so we will try modelling using these
+components from the additive classical decomposition. Further, we use
+the non-transformed data since attempts to transform the data did not solve
+the non-constant variance problem.
+
+## Non-regularized regression
+
+First, we try non-regularized regression. We keep the last year of data
+for the test set and use the rest for training. The resulting APSE values
+can be seen in the plot below. The dotted vertical red line indicates the
+degree at which APSE is minimized.
+
+```{r, include=FALSE}
+# saving the time of the entire time series data set
+Time <- as.vector(time(ts))
+# keep the last year for the test set, and the rest for training
+Training <- window(ts, start = 1978 + 10/12, end = 2023)
+Time.Training <- Time[1:531]
+Test <- window(ts, start = 2023 + 1/12, end = 2024)
+Time.Test <- Time[532:543]
+```
+
+```{r, include=FALSE}
+# orthogonal polynomials on the entire dataset
+d <- 15
+poly.Time <- poly(Time, d)
+
+# empty vector for saving APSE values
+APSE <- c()
+
+for(deg in 1:d) {
+    # get the seasonality of the training set
+    season <- as.factor(cycle(Training))
+    # save the orthogonal polynomials for the train set indices
+    Time.training <- poly.Time[1:531, 1:deg]
+    # fit model on training set using orthogonal polynomials subsetted on the
+    #  train set and the seasonal factor
+    model <- lm(Training ~ Time.training + season)
+
+    # save the orthogonal polynomials for the test set indices
+    Time.test <- poly.Time[532:543, 1:deg]
+    # get the seasonality of the test set
+    season.test <- as.factor(cycle(Test))
+
+    # matrix for the model using the test set
+    ModelMatrix <- model.matrix(Test ~ Time.test + season.test)
+    # predict on the test set
+    Pred.Claims <- coef(model) %*% t(ModelMatrix)
+    # calculate the APSE
+    APSE[deg] <- mean((as.vector(Test)-Pred.Claims)^2)
+}
+# output the APSE values
+data.frame(degree=c(1:15), APSE)
+
+```
+
+```{r, echo=FALSE, fig.dim=c(8,3.75)}
+plot(APSE, main="APSE values for non-regularized polynomial regression for degrees 1 to 15",
+     xlab="degree", ylab="APSE", xlim=c(1,16), cex.main=0.8, cex.lab=0.8, xaxt="n")
+text(1:15, APSE, round(APSE,6), cex=0.6, pos=4, col="black")
+axis(1, at=1:15, labels=c(1:15))
+abline(v=which.min(APSE), col="red", lty=2)
+mtext("Fig 6: APSE values for non-regularized polynomial regression", side=1, line=4, cex=0.8)
+```
+
+The best model for prediction amongst the non-regularized polynomial regression
+models would be the degree 6 model with an APSE of `r APSE[6]`. Let's perform
+model diagnostics for this model to see if the assumptions are satisfied.
+
+```{r, echo=FALSE, fig.dim=c(8,2.75)}
+# seasonality for the entire time series
+Season <- as.factor(cycle(ts))
+# fit the model of degree 6 on the entire data
+model6 <- lm(ts ~ poly(Time, 6) + Season)
+
+# model diagnostics for best non-regularized model
+
+# Graphical model diagnostics
+par(mfrow=c(1,2))
+## plot of residuals vs fitted values
+plot(model6$fitted, model6$residuals , pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs fitted values",
+     xlab="fitted values", ylab="residuals")
+abline(h=0,col="red" , lty=2, lwd=2) # horizontal line at 0
+mtext("Fig 7: Residuals vs fitted values plot", side=1, line=4, cex=0.8)
+
+## qq-plot of residuals
+qqPlot(model6$residuals , pch=16 , col=adjustcolor("black",0.7),
+            xlab = "Theoretical Quantiles (Normal)" ,
+            ylab = "Sample Quantiles (r.hat)",
+            main = "Normal Q-Q Plot",
+            id=FALSE) # suppress R console output of outliers
+mtext("Fig 8: QQplot of residuals", side=1, line=4, cex=0.8)
+par(mfrow=c(1,2))
+## plotting the residuals vs time
+plot(model6$residuals, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+abline(h=0,col="red" , lty=2, lwd=2) # plotting a horizontal line at 0
+mtext("Fig 9: Residuals vs time plot", side=1, line=4, cex=0.8)
+
+## acf plot of residuals
+acf(model6$residuals, main="ACF Plot of Residuals")
+mtext("Fig 10: ACF plot of residuals", side=1, line=4, cex=0.8)
+```
+
+We notice a trend in the residuals vs. fitted values plot, which suggests
+non-constant mean. From the QQ-plot, the data appears to be non-normal since a
+lot of points fall outside the confidence bands. From the residuals vs. time
+plot, we again see an up and down trend, suggesting non-constant mean. The
+linear decay in the ACF plot means there is still trend in the residuals.
+Non-graphical diagnostics were also checked, and details can be found under
+"Appendix-Regression -> Non-graphical residual diagnostics for all regression
+models". Figures [x] and [x] are relevant. The conclusions of those tests agree
+with the ones included here. Thus, the residuals are not stationary, not normal
+and not random. The assumptions are violated so we cannot use this model for
+prediction.
+
+## Regularized Regression
+
+```{r, include=FALSE}
+# the lambdas to search over
+Log.Lambda.Seq = seq(-7, 3, by = 0.1)
+Lambda.Seq = c(0, exp(Log.Lambda.Seq))
+
+# will try up to degree 15 polynomials
+d <- 15
+
+# saving the time of the entire time series data set in case it got overwritten
+Time <- as.vector(time(ts))
+# keep the last year for the test set, and the rest for training
+Y.training <- as.matrix(window(ts, start = 1978 + 10/12, end = 2023), ncol=1)
+Y.test <- as.matrix(window(ts, start = 2023 + 1/12, end = 2024), ncol=1)
+
+# season for entire data set
+s <- as.factor(cycle(Time))
+
+# orthogonal polynomials for entire dataset
+X <- poly(Time, d)[, 1:d]
+
+# empty vectors to save CV errors for each alpha=0, 0.25, 0.5, 0.75, 1
+cv.errors.ridge <- c()
+cv.errors.025 <- c()
+cv.errors.05 <- c()
+cv.errors.075 <- c()
+cv.errors.lasso <- c()
+
+# empty vectors to save optimal lambdas for each alpha=0, 0.25, 0.5, 0.75, 1
+lambdas.ridge <- c()
+lambdas.025 <- c()
+lambdas.05 <- c()
+lambdas.075 <- c()
+lambdas.lasso <- c()
+
+# test set indices
+indx <- 532:543
+
+for(deg in 1:d) {
+    # training set involving time
+    X.training <- X[-indx, 1:deg]
+
+    # season
+    s <- as.factor(cycle(ts))
+    s <- model.matrix(~0 + s)
+    s <- s[-indx,] # season for training set
+
+    # add columns for season to the training design matrix
+    X.training <- cbind(X.training, s)
+
+    # ridge regression (alpha=0)
+    set.seed(123) # for reproducibility
+    CV <- cv.glmnet(X.training, Y.training, lambda=Lambda.Seq,
+                    alpha=0, nfolds=10)
+    # cv error
+    cv.error <- CV$cvm[CV$lambda==CV$lambda.1se]
+    cv.errors.ridge[deg] <- cv.error
+    lambdas.ridge[deg] <- CV$lambda.1se
+
+    # alpha=0.25
+    set.seed(123) # for reproducibility
+    CV <- cv.glmnet(X.training, Y.training, lambda=Lambda.Seq,
+                    alpha=0.25, nfolds=10)
+    # cv error
+    cv.error <- CV$cvm[CV$lambda==CV$lambda.1se]
+    cv.errors.025[deg] <- cv.error
+    lambdas.025[deg] <- CV$lambda.1se
+
+    # alpha=0.5
+    set.seed(123) # for reproducibility
+    CV <- cv.glmnet(X.training, Y.training, lambda=Lambda.Seq,
+                    alpha=0.5, nfolds=10)
+    # cv error
+    cv.error <- CV$cvm[CV$lambda==CV$lambda.1se]
+    cv.errors.05[deg] <- cv.error
+    lambdas.05[deg] <- CV$lambda.1se
+
+    # alpha=0.75
+    set.seed(123) # for reproducibility
+    CV <- cv.glmnet(X.training, Y.training, lambda=Lambda.Seq,
+                    alpha=0.75, nfolds=10)
+    # cv error
+    cv.error <- CV$cvm[CV$lambda==CV$lambda.1se]
+    cv.errors.075[deg] <- cv.error
+    lambdas.075[deg] <- CV$lambda.1se
+
+    # LASSO (alpha=1)
+    set.seed(123) # for reproducibility
+    CV <- cv.glmnet(X.training, Y.training, lambda=Lambda.Seq,
+                    alpha=1, nfolds=10)
+    # cv error
+    cv.error <- CV$cvm[CV$lambda==CV$lambda.1se]
+    cv.errors.lasso[deg] <- cv.error
+    lambdas.lasso[deg] <- CV$lambda.1se
+}
+```
+
+We try using regularization. We again go up to degree 15 polynomials and we try
+ridge, elastic net (alpha = 0.25, 0.5, 0.75) and LASSO models. We have
+calculated CV errors for each of these models and concluded:
+
+The best model for alpha=0 is the degree 13 model, with CV error of `r cv.errors.ridge[13]`.
+The best model(s) for alpha=0.25, 0.5, 0.75 and 1 are the degree 15 models, with
+CV errors of `r cv.errors.025[15]`, `r cv.errors.05[15]`, `r cv.errors.075[15]`, and
+`r cv.errors.lasso[15]`, respectively. The CV plots are under "Appendix-Regression -> CV Error plots for regularized models".
+Refer to figures 6, 7, 8, 9 and 10. We fit these models on the training set with their corresponding optimal
+lambdas and then predict on the test set to calculate the APSEs.
+
+```{r, include=FALSE}
+# season
+s <- as.factor(cycle(ts))
+s <- model.matrix(~0 + s)
+s.train <- s[-indx,] # season for training set
+s.test <- s[indx,] # season for test set
+
+d <- 15
+# orthogonal polynomials for entire dataset
+X <- poly(Time, d)[, 1:d]
+# training sets for the optimal degree polynomials for each alpha with seasonality
+X.training.ridge <- cbind(X[-indx, 1:which.min(cv.errors.ridge)], s.train)
+X.training.025 <- cbind(X[-indx, 1:which.min(cv.errors.025)], s.train)
+X.training.05 <- cbind(X[-indx, 1:which.min(cv.errors.05)], s.train)
+X.training.075 <- cbind(X[-indx, 1:which.min(cv.errors.075)], s.train)
+X.training.lasso <- cbind(X[-indx, 1:which.min(cv.errors.lasso)], s.train)
+
+# test sets for the optimal degree polynomials for each alpha
+X.test.ridge <- cbind(X[indx, 1:which.min(cv.errors.ridge)], s.test)
+X.test.025 <- cbind(X[indx, 1:which.min(cv.errors.025)], s.test)
+X.test.05 <- cbind(X[indx, 1:which.min(cv.errors.05)], s.test)
+X.test.075 <- cbind(X[indx, 1:which.min(cv.errors.075)], s.test)
+X.test.lasso <- cbind(X[indx, 1:which.min(cv.errors.lasso)], s.test)
+
+# models for each alpha on the train set
+model.ridge <- glmnet(X.training.ridge, Y.training,
+                      lambda=lambdas.ridge[which.min(cv.errors.ridge)],
+                      alpha=0, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+model.025 <- glmnet(X.training.025, Y.training,
+                      lambda=lambdas.025[which.min(cv.errors.025)],
+                      alpha=0.25, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+model.05 <- glmnet(X.training.05, Y.training,
+                      lambda=lambdas.05[which.min(cv.errors.05)],
+                      alpha=0.5, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+model.075 <- glmnet(X.training.075, Y.training,
+                      lambda=lambdas.075[which.min(cv.errors.075)],
+                      alpha=0.75, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+model.lasso <- glmnet(X.training.lasso, Y.training,
+                      lambda=lambdas.lasso[which.min(cv.errors.lasso)],
+                      alpha=1, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+# predict on the test set for each model
+pred.ridge <- predict.glmnet(model.ridge, newx=X.test.ridge, type="response")
+pred.025 <- predict.glmnet(model.025, newx=X.test.025, type="response")
+pred.05 <- predict.glmnet(model.05, newx=X.test.05, type="response")
+pred.075 <- predict.glmnet(model.075, newx=X.test.075, type="response")
+pred.lasso <- predict.glmnet(model.lasso, newx=X.test.lasso, type="response")
+
+# calculate the APSE for each model
+apse.ridge <- mean((Y.test-pred.ridge)^2)
+apse.025 <- mean((Y.test-pred.025)^2)
+apse.05 <- mean((Y.test-pred.05)^2)
+apse.075 <- mean((Y.test-pred.075)^2)
+apse.lasso <- mean((Y.test-pred.lasso)^2)
+
+# output the APSE values for each model for comparison
+model.name <- c("ridge", "alpha=0.25", "alpha=0.5", "alpha=0.75", "lasso")
+model.apses <- c(apse.ridge, apse.025, apse.05, apse.075, apse.lasso)
+data.frame(model.name, model.apses)
+```
+
+```{r, echo=FALSE, fig.dim=c(8,3.75)}
+plot(model.apses, xaxt = "n", xlab="Model", ylab="APSE values", cex.lab=0.8,
+     main="APSE values for best regularized models", cex.main=0.8, xlim=c(1,6))
+text(1:5, model.apses, round(model.apses,8), cex=0.6, pos=4, col="black")
+axis(1, at=1:5, labels=model.name)
+abline(v=which.min(model.apses), col="red", lty=2)
+mtext("Fig 11: APSE values for best regularized models", side=1, line=4, cex=0.8)
+```
+
+According to the APSEs, the best regularized regression model(s) are degree
+15 models for alpha=0.25, 0.5, 0.75 and 1.
+
+For brevity, we do not include the details of the model diagnostics for the
+degree 15 model with alpha=0.25, although they can be found under "Appendix-Regression -> Graphical Residual diagnostics for regularized
+models" and "Appendix-Regression -> Non-graphical residual diagnostics for
+all regression models". Figures [x], [x], [x] and [x] are relevant. We simply
+state the results of these diagnostics, which is that model assumptions are
+violated. The conclusion is similar for the degree 15 models with alpha values
+0.5, 0.75 and 1 (details in the same appendix section mentioned above). So these
+models should not be used for prediction.
+
+Although ridge regression model has a higher APSE than these models, we check
+its residuals as well, hoping that they look better. For brevity, we only state
+the conclusion that the assumptions are violated for this model as well, but
+the details are under the same appendix section mentioned above.
+
+Therefore, none of these regularized regression models should be used
+for prediction.
+
+```{r, include=FALSE}
+# summary table of the models and their APSE
+apse.nonreg <- min(APSE)
+models <- c("ridge", "alpha=0.25", "alpha=0.5", "alpha=0.75", "lasso", "non-regularized")
+vals <- c(apse.ridge, apse.025, apse.05, apse.075, apse.lasso, apse.nonreg)
+data.frame(models, APSE=vals)
+```
+
+However, the project asks for us to provide a forecast using the final model,
+so we compare the APSE values of the best regularized model to the best
+non-regularized model, and find that the non-regularized polynomial
+regression model of degree 6 has the smallest APSE (value of `r vals[6]`).
+
+We use this model to provide a forecast. However, this forecast should
+not be used or trusted as assumptions for all these models are violated!
+
+## Forecast
+
+Let's forecast the next 24 months. As stated before, this will not be an
+accurate forecast and should not be trusted as the model assumptions are
+violated. In particular, since we have non-normal results, the prediction
+interval is not trustworthy.
+
+```{r, echo=FALSE, fig.dim=c(8,4)}
+# next 24 months
+NewTime <- c(2024 + c(1:24)/12) # 24 months into the future
+# seasons for next 24 months
+NewSeason <- factor(rep(c(2:12, 1),2))
+
+# data frame for forecast
+Forecast <- data.frame(Time=NewTime, Season=NewSeason)
+
+# forecast
+forecast.values <- predict.lm(model6, Forecast, interval='prediction')
+
+# plot of the data with the forecast
+plot(ts, main="Electricity Price in the US with 2 year forecast", xlab="Time",
+     ylab="Electricity Price", xlim=c(1978, 2027), ylim=c(0, 0.25))
+points(Time, predict.lm(model6), type='l', col='purple', lwd=2)
+abline(v=2024 + 1/12, col="blue", lty=2) # vertical line where prediction starts
+points(NewTime, forecast.values[,1], type='l', col="red")
+lines(NewTime, forecast.values[,2], col="green")
+lines(NewTime, forecast.values[,3], col="green")
+legend("topleft", legend=c("original data", "fitted model (p=6)",
+                           "prediction", "prediction interval"),
+       lty=1, col=c("black", "purple", "red", "green"))
+mtext("Fig 12: 24-month forecast using best regression model", side=1, line=4, cex=0.8)
+```
+
+Overall, polynomial regression models are not great predictive models for this
+data set. We will now explore other methods/models to try and find a
+better forecasting model.
+
+# Smoothing Methods
+```{r, include=FALSE}
+data$DATE <- as.Date(data$DATE)
+names(data)[names(data) == "APU000072610"] <- "PRICE"
+data$PRICE <- as.numeric(data$PRICE)
+#impute missing data
+data$PRICE[83] <- (data$PRICE[82] + data$PRICE[84])/2
+
+
+ts <- ts(data$PRICE, start = 1978 + 10/12, frequency = 12)
+plot(ts)
+
+```
+
+```{r, include=FALSE}
+# acf plot of the time series to check for trend and/or seasonality
+acf(ts)
+
+```
+
+
+
+```{r, include=FALSE}
+acf(diff(ts))
+
+```
+ 
+```{r, include=FALSE}
+# time series data
+ts <- ts(data$PRICE, start = 1978 + 10/12, frequency = 12)
+
+# making the training and test sets 
+train <- window(ts, start = 1978 + 10/12, end = 2023)
+test <- window(ts, start = 2023 + 1/12, end = 2024)
+
+
+```
+
+
+```{r, include=FALSE}
+# Additive HW method
+hw.ad.train.es <- HoltWinters(train, gamma = F, beta = F, seasonal = "additive")
+hw.ad.train.es
+
+  # Make predictions on the test set
+  predictions1 <- predict(hw.ad.train.es, newdata = test, n.ahead=length(test))
+  
+  # APSE for the current degree
+  apse1 <- mean((test - predictions1)^2)
+apse1
+
+```
+
+```{r, include=FALSE}
+# predict 12 months ahead
+predict.es <- predict(hw.ad.train.es, n.ahead = length(test), prediction.interval = T, level = 0.95)
+predict.es
+
+```
+
+
+```{r, include=FALSE}
+# plot of the training data along with the predictions for the next 12 months
+plot(hw.ad.train.es, predict.es)
+
+```
+
+
+```{r, include=FALSE}
+# calculating the residuals 
+res1 <- residuals(hw.ad.train.es)
+acf(res1)
+
+```
+
+
+```{r, include=FALSE}
+# Additive HW method
+hw.ad.train.des <- HoltWinters(train, gamma = F, seasonal = "additive")
+hw.ad.train.des
+
+  # Make predictions on the test set
+  predictions2 <- predict(hw.ad.train.des, newdata = test, n.ahead=length(test))
+  
+  # APSE for the current degree
+  apse2 <- mean((test - predictions2)^2)
+apse2
+
+```
+
+```{r, include=FALSE}
+# predict 12 months ahead of the training set 
+predict.des <- predict(hw.ad.train.des, n.ahead = length(test), prediction.interval = T, level = 0.95)
+predict.des
+
+```
+
+```{r, include=FALSE}
+# plot of the training set with the predicted values 
+plot(hw.ad.train.des, predict.des)
+
+```
+
+
+
+
+
+```{r, include=FALSE}
+# calculating the residuals of the model 
+res2 <- residuals(hw.ad.train.des)
+# extending the acf plot to see if there are signs of slow decay in lag of season
+acf(res2, lag.max = 38)
+
+```
+
+
+
+
+
+
+```{r, include=FALSE}
+# Additive HW method
+hw.ad.train <- HoltWinters(train, seasonal = "additive")
+hw.ad.train
+
+  # Make predictions on the test set
+  predictions3 <- predict(hw.ad.train, newdata = test, n.ahead=length(test))
+  
+  # APSE for the current degree
+  apse3 <- mean((test - predictions3)^2)
+apse3
+
+```
+
+
+
+```{r, include=FALSE}
+# predicting for the next 12 months
+pred.ad <- predict(hw.ad.train, n.ahead = length(test), prediction.interval = T, level = 0.95)
+pred.ad
+
+
+```
+
+```{r, include=FALSE}
+plot(hw.ad.train, pred.ad)
+
+```
+
+
+
+
+```{r, include=FALSE}
+res3 <- residuals(hw.ad.train)
+acf(res3)
+
+```
+
+
+
+```{r, include=FALSE}
+# Multiplicative Holt Winters method
+hw.mul.train <- HoltWinters(train, seasonal = "multiplicative")
+
+  # Make predictions on the test set
+  predictions4 <- predict(hw.mul.train, n.ahead=length(test))
+  
+  # APSE for the current degree
+  apse4 <- mean((test - predictions4)^2)
+apse4
+
+```
+
+
+```{r, include=FALSE}
+# prediction 
+pred.mul <- predict(hw.mul.train, n.ahead = length(test), prediction.interval = T, level = 0.95)
+pred.mul
+
+```
+
+
+```{r, include=FALSE}
+plot(hw.mul.train, pred.mul)
+
+```
+
+```{r, include=FALSE}
+plot(hw.mul.train, pred.mul, ylim = c(0,0.25))
+
+```
+
+
+```{r, include=FALSE}
+res4 <- residuals(hw.mul.train)
+acf(res4)
+
+```
+
+
+```{r, include=FALSE}
+# Multiplicative Holt Winters method
+hw.mul.train.season <- HoltWinters(train, beta = F, seasonal = "multiplicative")
+
+  # Make predictions on the test set
+  predictions5 <- predict(hw.mul.train.season, n.ahead=length(test))
+  
+  # APSE for the current degree
+  apse5 <- mean((test - predictions5)^2)
+apse5
+
+```
+
+```{r, include=FALSE}
+# prediction 
+pred.mul.season <- predict(hw.mul.train.season, n.ahead = length(test), prediction.interval = T, level = 0.95)
+pred.mul.season
+
+```
+
+```{r, include=FALSE}
+plot(hw.mul.train.season, pred.mul.season)
+
+```
+
+
+```{r, include=FALSE}
+res5 <- residuals(hw.mul.train.season)
+acf(res5)
+
+```
+
+
+```{r, include=FALSE}
+# Additive Holt Winters method
+hw.ad.train.season <- HoltWinters(train, beta = F, seasonal = "additive")
+
+  # Make predictions on the test set
+  predictions6 <- predict(hw.ad.train.season, n.ahead=length(test))
+  
+  # APSE for the current degree
+  apse6 <- mean((test - predictions6)^2)
+apse6
+
+```
+
+
+```{r, include=FALSE}
+# prediction 
+pred.ad.season <- predict(hw.ad.train.season, n.ahead = length(test), prediction.interval = T, level = 0.95)
+pred.ad.season
+
+```
+
+
+```{r, include=FALSE}
+plot(hw.ad.train.season, pred.ad.season)
+
+```
+
+
+```{r, include=FALSE}
+res6 <- residuals(hw.ad.train.season)
+acf(res6)
+
+```
+
+ 
+
+
+```{r, include=FALSE}
+# storing the apse values together
+apse_vals <- c(apse1, apse2, apse3, apse4, apse5, apse6)
+which.min(apse_vals)
+
+```
+ 
+
+
+```{r, include=FALSE, fig.dim=c(4,3.5)}
+par(mfrow = c(1,2))
+
+plot(apse_vals, main="APSE values for Holt-Winters models",
+     xlab="HW method", ylab="APSE")
+abline(v=which.min(apse_vals), col="red", lty=2)
+
+```
+We now wish to explore alternative smoothing methods to regression. Since our data has both trend and seasonality, we will investigate Holt-Winters and Differencing as alternative smoothing methods to regression. 
+
+## Holt-Winters 
+We will choose the "best" Holt Winters model using the test/train set APSE criterion
+
+```{r, echo = FALSE}
+library(knitr)
+df <- data.frame( HWMethod = c("1. Simple Exponential Smoothing
+", "2. Double Exponential Smoothing", "3. Holt-Winters (Additive)
+", "4. Holt-Winters (Multiplicative)", "5. Season Only (Multiplicative)
+", "6. Season Only (Additive)"), 
+APSE = c(5.583565e-06, 4.137981e-06, 6.093366e-05, 9.750502e-05, 5.937758e-06, 7.523979e-06))
+kable(df)
+
+```
+                 Figure 13: APSE values of Holt-Winters Models 
+
+In reference to the table, Figure 13, the smallest APSE value corresponds to the Holt Winters additive method with trend only. We will examine the plot of the chosen model with its predictions on the test set and also examine the residuals to check for stationarity. Details of other Holt Winters models can be found in the Holt Winters section of the Appendix. 
+
+```{r, include=FALSE}
+hw.ad.full <- HoltWinters(ts, gamma=F, seasonal = "additive")
+hw.ad.full
+
+```
+
+```{r, echo=FALSE, fig.height=3.5}
+par(mfrow = c(1,2))
+# plot of the training set with the predicted values
+plot(hw.ad.train.des, predict.des, ylab = "Electricity Price", main = "Prediction of DES Holt-Winters 
+     Model using Training Set", cex.main = 0.8)
+
+legend("topleft", legend=c("original data", "fitted model (des)",
+                          "prediction interval"),
+       lty=1, col=c("black", "red", "blue"), cex = 0.5)
+mtext("Fig 14: Prediction of DES Holt-Winters Model using Training Set", side=1, line=4, cex=0.6)
+
+
+# calculating the residuals of the model 
+res2 <- residuals(hw.ad.train.des)
+# extending the acf plot to see if there are signs of slow decay in lag of season
+acf(res2, lag.max = 38, main = "ACF Plot")
+mtext("Fig 15: ACF plot of DES Holt Winters Model", side=1, line=4, cex=0.6)
+
+```
+
+Figure 15 shows the existence of slow decay in the lag of season visible in the ACF plot, hence the residuals of our chosen model are non-stationary.
+
+### Forecasting for the next 24 months: 
+
+```{r, include=FALSE}
+# prediction 
+pred.ad.full <- predict(hw.ad.full, n.ahead = 24, prediction.interval = T, level = 0.95)
+pred.ad.full
+
+```
+
+```{r, echo=FALSE, fig.dim=c(6,2.75)}
+plot(hw.ad.full, pred.ad.full, ylab = "Electricity Price", main = "Electricity Price in US with 2 year forecast" )
+
+
+legend("topleft", legend=c("original data", "fitted model (des)",
+                          "prediction interval"),
+       lty=1, col=c("black", "red", "blue"), cex = 0.6)
+mtext("Fig 16: Electricity Price in US with 2 year forecast", side=1, line=4, cex=0.8)
+```
+
+The prediction intervals of our plot are quite wide in Figure 16 and our trend only additive model does not take into account the non-stationary seasonal nature of our data, therefore long-term prediction is more than likely unsuitable for this model. 
+
+The reason this Holt-Winters model in particular was chosen could be due to the nature of our data and a drastic change point after 2020, which indicates the sudden increase in electricity price, possibily due to the knock on effects of the global pandemic caused by Covid-19.  
+
+## Differencing
+
+Differencing can be used for trend and/or seasonal elimination. We will try a series of different differencing methods to make our data stationary., such as differencing in lag one (regular differencing), differencing in the lag of season (lag 12, known as seasonal differencing).
+
+### One Time Regular Differencing 
+
+```{r, echo=FALSE, fig.height=3}
+# differencing once in lag one
+par(mfrow = c(1,2))
+diff1 <- diff(ts)
+plot(diff1, type ="l", ylab = "First Difference", main = "Plot of Differenced US Electricity Price", cex.main= 0.8)
+mtext("Fig 17: US Electricity Price (One Time Regular Differencing)", side=1, line=4, cex=0.5)
+acf(diff1, main = "ACF plot")
+mtext("Fig 18: ACF Plot (One Time Regular Differencing)", side=1, line=4, cex=0.5)
+```
+
+There is presence of linear decay in the lag of season in the above ACF plot, Figure 18, so the data is non-stationary.
+
+### One Time Seasonal Differencing in Lag 12
+
+```{r, echo=FALSE, fig.height=3}
+par(mfrow = c(1,2))
+diff2 <- diff(ts, lag=12)
+plot(diff2, type = "l", ylab = "Seasonal Difference in Lag 12", main = "Plot of Differenced US Electricity Price", cex.main=0.8)
+mtext("Fig 19: US Electricity Price (One Time Seasonal Differencing)", side=1, line=4, cex=0.5)
+
+acf(diff2, main = "ACF plot")
+mtext("Fig 20: ACF Plot (One Time Seasonal Differencing)", side=1, line=4, cex=0.5)
+```
+
+There is exponential decay clearly visible in the ACF plot, Figure 20, so the data is stationary but correlated. 
+
+### Combination of Regular and Seasonal Differencing
+
+```{r, echo=FALSE, fig.height=3}
+par(mfrow = c(1,2))
+diff3 <- diff(diff2)
+
+plot(diff3, type = "l", ylab = "Combination Differencing", main = "Plot of Differenced US Electricity Price", cex.main = 0.8)
+mtext("Fig 21: US Electricity Price (Comibination Differencing)", side=1, line=4, cex=0.5)
+acf(diff3, main = "ACF Plot")
+mtext("Fig 22: ACF Plot (Combination Differencing)", side=1, line=4, cex=0.5)
+
+```
+
+There is no presence of linear decay or other indicators of non-stationarity in the above ACF Plot, Figure 22, therefore the data is stationary, however we may have overdifferenced here as we achieved stationarity by differencing once in the lag of season i.e. lag 12. 
+
+Overdifferencing leads to increased variability which we want to avoid. 
+
+```{r, echo = FALSE}
+library(astsa)
+data$DATE <- as.Date(data$DATE)
+names(data)[names(data) == "APU000072610"] <- "PRICE"
+data$PRICE <- as.numeric(data$PRICE)
+#impute missing data
+data$PRICE[83] <- (data$PRICE[82] + data$PRICE[84])/2
+
+ts <- ts(data$PRICE, start=1978 + 10/12, frequency=12)
+```
+
+# Box-Jenkins modelling
+From the differencing section of this project, we note that both one-time seasonal differencing and a combined one-time seasonal plus one-time differencing on a lag of 1 can be used to generate SARIMA models. The ACF and PACF plots for both differenced time series is displayed in Figure 23.
+
+```{r, echo = FALSE}
+one_time_seasonal_diff <- diff(ts, lag = 12)
+combined_diff <- diff(diff(ts, lag = 12))
+
+par(mfrow=c(2, 2))
+
+acf(one_time_seasonal_diff, lag.max=70, main = "ACF of seasonal differenced data")
+mtext("Figure 23A: ACF plot of seasonal differenced data", side=1, line=4, cex=0.5)
+
+pacf(one_time_seasonal_diff, lag.max=70, main = "PACF of seasonal differenced data")
+mtext("Figure 23B: PACF plot of seasonal differenced data", side=1, line=4, cex=0.5)
+
+acf(combined_diff, lag.max=70, main = "ACF of combined differenced data")
+mtext("Figure 23C: ACF plot of combined differenced data", side=1, line=4, cex=0.5)
+
+pacf(one_time_seasonal_diff, lag.max=70, main = "PACF of combined differenced data")
+mtext("Figure 23D: PACF plot of combined differenced data", side=1, line=4, cex=0.5)
+```
+
+We will continue working with the combined differenced data. Modelling on the seasonally differenced data can be found in the appendix section titled "Seasonal differenced SARIMA".
+
+## Model proposing
+We can see in the top 2 plots in Figure 23 that the ACF cuts off at lag 1 and the partial ACF plot cuts off at around lag 2. Also note that the ACF plot of the data squared does not exhibit any trends, indicating that there is constant variance (can be found in the appendix section titled "Variance analysis of combined difference data")
+
+Since we are working off data that has been one-time differenced on a lag of 1 and a one-time difference on a lag of season (lag = 12), we have d = 1, D = 1 and s = 12. Since we used seasonal and one-time differencing, we will propose a few different SARIMA models (Models 2-10 can be found in the appendix section titled "Additional SARIMA model proposals":
+
+* Proposal 1: $SARIMA(0, 1, 5) \cdot (0, 1, 1)_{12}$: If we remove the seasonal lags, we can see that the ACF plot cuts off to 0 after lag 5 (justifying q = 5) and the PACF plot is exponentially decreasing (justifying p = 0). If we only look at the seasonal lags, the ACF plots off after the lag = 12 (justifying Q = 1) and the PACF plot is exponentially decreasing (justifying P = 0).
+* Proposal 11: $SARIMA(2, 1, 1) \cdot (2, 1, 1)_{12}$: We can interpret both ACF and PACF plots as exponential decay across both regular and seasonal lags, so ARMA modelling can be used. We simply vary p, q, P and Q for this model.
+* Proposal 12: $SARIMA(1, 1, 2) \cdot (2, 1, 1)_{12}$: Varying the ARMA model parameters for both ARIMA models.
+
+## Model fitting
+We will fit our models on all data from 1978 to 2023 and keep the 2023-2024 data for testing. We will look at AICc as a measure of fit across all 12 model proposals and select the top 3 models for further investigation
+```{r, echo = FALSE, include=FALSE}
+training_ts <- window(ts, start = 1978 + 10/12, end = 2023)
+testing_ts <- window(ts, start = 2023 + 1/12, end = 2024)
+
+sarima_model_1 <- sarima(training_ts, p=0, d=1, q=5, P=0, D=1, Q=1, S=12, details=FALSE)
+sarima_model_2 <- sarima(training_ts, p=0, d=1, q=5, P=2, D=1, Q=0, S=12, details=FALSE)
+sarima_model_3 <- sarima(training_ts, p=1, d=1, q=1, P=0, D=1, Q=1, S=12, details=FALSE)
+sarima_model_4 <- sarima(training_ts, p=1, d=1, q=1, P=2, D=1, Q=0, S=12, details=FALSE)
+sarima_model_5 <- sarima(training_ts, p=1, d=1, q=2, P=0, D=1, Q=1, S=12, details=FALSE)
+sarima_model_6 <- sarima(training_ts, p=2, d=1, q=1, P=0, D=1, Q=1, S=12, details=FALSE)
+sarima_model_7 <- sarima(training_ts, p=1, d=1, q=2, P=2, D=1, Q=0, S=12, details=FALSE)
+sarima_model_8 <- sarima(training_ts, p=1, d=1, q=1, P=1, D=1, Q=1, S=12, details=FALSE)
+sarima_model_9 <- sarima(training_ts, p=1, d=1, q=1, P=1, D=1, Q=2, S=12, details=FALSE)
+sarima_model_10 <- sarima(training_ts, p=1, d=1, q=1, P=2, D=1, Q=1, S=12, details=FALSE)
+sarima_model_11 <- sarima(training_ts, p=2, d=1, q=1, P=2, D=1, Q=1, S=12, details=FALSE)
+sarima_model_12 <- sarima(training_ts, p=1, d=1, q=2, P=2, D=1, Q=1, S=12, details=FALSE)
+```
+
+```{r, include = FALSE}
+aicc_values <- c(
+ sarima_model_1$IC[2],
+ sarima_model_2$IC[2],
+ sarima_model_3$IC[2],
+ sarima_model_4$IC[2],
+ sarima_model_5$IC[2],
+ sarima_model_6$IC[2],
+ sarima_model_7$IC[2],
+ sarima_model_8$IC[2],
+ sarima_model_9$IC[2],
+ sarima_model_10$IC[2],
+ sarima_model_11$IC[2],
+ sarima_model_12$IC[2]
+)
+model_values <- c("sarima_model_1", "sarima_model_2", "sarima_model_3", "sarima_model_4", "sarima_model_5", "sarima_model_6", "sarima_model_7", "sarima_model_8", "sarima_model_9", "sarima_model_10", "sarima_model_11", "sarima_model_12")
+
+
+model_aic_df <- data.frame(
+ Model = c("sarima_model_1", "sarima_model_2", "sarima_model_3", "sarima_model_4", "sarima_model_5", "sarima_model_6", "sarima_model_7", "sarima_model_8", "sarima_model_9", "sarima_model_10", "sarima_model_11", "sarima_model_12"),
+ AICc = aicc_values
+)
+
+# Sort the data frame by AIC values
+model_aic_df <- model_aic_df[order(model_aic_df$AICc), ]
+
+# Select the top 3 models
+top_3_models <- model_aic_df[1:3, ]
+
+# top_3_models
+kable(top_3_models)
+```
+Fig 24: Top 3 AICc values and corresponding models
+
+The 3 models with the lowest AICc are:
+* $SARIMA(0, 1, 5) \cdot (0, 1, 1)_{12}$
+* $SARIMA(2, 1, 1) \cdot (2, 1, 1)_{12}$
+* $SARIMA(1, 1, 2) \cdot (2, 1, 1)_{12}$
+
+Let us now check the residuals to make sure that model assumptions are not violated
+
+## Model residual analysis
+For Model 1, we have:
+
+```{r, echo = FALSE, results = 'hide', fig.dim = c(8, 4)}
+sarima(training_ts, p=0, d=1, q=5, P=0, D=1, Q=1, S=12)
+```
+Figure 25: Model 1 residual plot
+
+There are a couple of things to point out from the residual plots in Figure 25:
+
+* The time series of the residuals looks quite random with no significant trend or seasonality present through visual analysis
+* There are no major spikes in the ACF across lags, indicating that there is no autocorrelation in the residuals
+* For the most part, the residuals do look normally distributed from the Q-Q plot, although there are some heavy tail data points
+* Most of the p-values for the Ljung-Box test are above 0.05, indicating that there is not much evidence to suggest that the residuals are not independently distributed
+
+You can see the residual plots for models 11 and 12 in the appendix section titled "Model 11 and 12 model diagnostics".
+
+## Model forecasting
+
+Let's forecast each model on the test dataset, which is a 12-step ahead prediction. APSE scores are as follows:
+```{r, include = FALSE}
+par(mfrow=c(1, 3))
+fig.dim = c(8, 4)
+fore1 <- sarima.for(training_ts, n.ahead=12, p=0, d=1, q=5, P=0, D=1, Q=1, S=12)
+title("Model 1 Test Set Forecast")
+fore11 <- sarima.for(training_ts, n.ahead=12, p=2, d=1, q=1, P=2, D=1, Q=1, S=12)
+title("Model 11 Test Set Forecast")
+fore12 <- sarima.for(training_ts, n.ahead=12, p=1, d=1, q=2, P=2, D=1, Q=1, S=12)
+title("Model 12 Test Set Forecast")
+```
+
+
+```{r, echo = FALSE}
+apse_model1 <- mean((testing_ts - fore1$pred)^2)
+apse_model11 <- mean((testing_ts - fore11$pred)^2)
+apse_model12 <- mean((testing_ts - fore12$pred)^2)
+
+apse_df <- data.frame(
+ Model = c("Model1", "Model11", "Model12"),
+ APSE = c(apse_model1, apse_model11, apse_model12)
+)
+
+kable(apse_df)
+```
+From the APSE results, we can see that Model 1 has the lowest APSE score on the testing dataset. Let's use this model to forecast for the next two years using the entire dataset.
+```{r, echo=FALSE, fig.dim = c(8, 3)}
+par(mfrow=c(1, 2))
+two_year_forecast <- sarima.for(ts, n.ahead=24, p=0, d=1, q=5, P=0, D=1, Q=1, S=12)
+title("2 Year Forecast")
+
+
+# 95% confidence interval
+lower <- two_year_forecast$pred - 1.96*two_year_forecast$se
+upper <- two_year_forecast$pred + 1.96*two_year_forecast$se
+fit <- two_year_forecast$pred
+ts.plot(ts,
+        ylab='Electricity consumption',
+        ylim=c(0, 0.2),
+        xlim = c(2020, 2026),
+        main='2 Year Forecast - 95% CI')
+lines(fit,col='red',type='b',pch='*')
+lines(lower,col='blue',lty=2)
+lines(upper,col='blue',lty=2)
+```
+Figure 26: 2 year prediction intervals
+
+# Combination
+
+Looking at combination, we chose to stack Box-Jenkins models on top of the 
+degree 6 regression model. We used both the seasonal differencing and one-time
+differencing of the residuals for the model as the ACF plot showed indication 
+that they were non-stationary (see Fig[x] and Fig[x] in Appendix). The two models
+were selected using the lowest AICc scores when fit on the test set, and they 
+were:
+
+* SARIMA(6, 0, 0)x(0, 1, 1)_12
+* SARIMA(5, 1, 0)x(2, 0, 0)_12
+
+For the first model, d=0, D=1 and s=12 were chosen from differencing. We choose
+p=6 as PACF cuts off after lag 6 and ACF has exponential decay. We choose Q=1
+as the ACF cuts off after the first season and PACF is exponentially decaying.
+
+For the second model, d=1, D=0 and s=12 were chosen from differencing. We choose
+p=5 as PACF cuts off after lag 6 and ACF has exponential decay. We choose P=2 
+because one can argue that the PACF cuts off after the second season.
+
+Let's take a look at the forecasts:
+```{r, include=FALSE}
+
+# get the seasonality of the training set
+season <- as.factor(cycle(Training))
+# save the orthogonal polynomials for the train set indices
+Time.training <- poly.Time[1:531, 1:6]
+# fit model on training set using orthogonal polynomials subsetted on the
+#  train set and the seasonal factor
+
+model <- lm(Training ~ Time.training + season)
+res_time_series <- ts(model$residuals, frequency = 12)
+sarima_model2_residuals <- sarima(res_time_series, p = 6, q = 0, d = 0, P = 0, D = 1, Q = 1, S = 12)
+```
+
+```{r, include=FALSE}
+# Only Model 2 did well
+# Let's look at APSE
+
+# save the orthogonal polynomials for the test set indices
+Time.test <- poly.Time[532:543, 1:6]
+  # get the seasonality of the test set
+season.test <- as.factor(cycle(Test))
+
+# matrix for the model using the test set
+ModelMatrix <- model.matrix(Test ~ Time.test + season.test)
+# # predict on the test set
+Pred.Claims <- coef(model) %*% t(ModelMatrix)
+
+# Predicting
+fore_residuals <- sarima.for(res_time_series, n.ahead=12, p = 6, q = 0, d = 0, P = 0, D = 1, Q = 1, S = 12)
+final_test_set_forecasted_values <- Pred.Claims + as.vector(fore_residuals$pred)
+
+# APSE
+apse_residual_model <- mean((as.vector(Test)-final_test_set_forecasted_values)^2)
+print(apse_residual_model)
+```
+
+```{r, include=FALSE}
+# Fitting full model
+# seasonality for the entire time series
+Season <- as.factor(cycle(ts))
+
+# fit the model of degree 6 on the entire data
+model6 <- lm(ts ~ poly(Time, 6) + Season)
+full_res_time_series <- ts(model6$residuals, frequency = 12)
+residual_model <- sarima(full_res_time_series, p = 6, q = 0, d = 0, P = 0, D = 1, Q = 1, S = 12)
+```
+
+```{r, include=FALSE}
+# Forecasting next two years
+
+# next 24 months
+NewTime <- c(2024 + c(1:24)/12) # for when want to do future predictions 28.50 in a1 sols
+# seasons for next 24 months
+NewSeason <- factor(rep(c(2:12, 1),2))
+
+# data frame for forecast
+Forecast <- data.frame(Time=NewTime, Season=NewSeason)
+
+# forecast
+forecast.values <- predict.lm(model6, Forecast, interval='prediction')
+forecast.values.residuals <- sarima.for(full_res_time_series, n.ahead = 24, p = 0, q = 5, d = 1, P = 0, D = 1, Q = 2, S = 12)
+final_forecast <- forecast.values[,1] + forecast.values.residuals$pred
+```
+
+```{r, echo=FALSE, out.width="60%"}
+
+```
+
+```{r, include=FALSE}
+sarima_model8_residuals <- sarima(res_time_series, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+
+# Let's look at APSE for model 8
+# sarima_model8_residuals <- sarima(res_time_series, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+# save the orthogonal polynomials for the test set indices
+Time.test <- poly.Time[532:543, 1:6]
+  # get the seasonality of the test set
+season.test <- as.factor(cycle(Test))
+
+# matrix for the model using the test set
+ModelMatrix <- model.matrix(Test ~ Time.test + season.test)
+# # predict on the test set
+Pred.Claims <- coef(model) %*% t(ModelMatrix)
+
+# Predicting
+fore_residuals <- sarima.for(res_time_series, n.ahead=12, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+final_test_set_forecasted_values <- Pred.Claims + as.vector(fore_residuals$pred)
+
+# APSE
+apse_residual_model <- mean((as.vector(Test)-final_test_set_forecasted_values)^2)
+print(apse_residual_model)
+
+# Fitting full model
+# seasonality for the entire time series
+Season <- as.factor(cycle(ts))
+
+# fit the model of degree 6 on the entire data
+model6 <- lm(ts ~ poly(Time, 6) + Season)
+full_res_time_series <- ts(model6$residuals, frequency = 12)
+residual_model <- sarima(full_res_time_series, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+# Forecasting next two years
+
+# next 24 months
+NewTime <- c(2024 + c(1:24)/12) # for when want to do future predictions 28.50 in a1 sols
+# seasons for next 24 months
+NewSeason <- factor(rep(c(2:12, 1),2))
+
+# data frame for forecast
+Forecast <- data.frame(Time=NewTime, Season=NewSeason)
+
+# forecast
+forecast.values <- predict.lm(model6, Forecast, interval='prediction')
+forecast.values.residuals <- sarima.for(full_res_time_series, n.ahead = 24, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+final_forecast2 <- forecast.values[,1] + forecast.values.residuals$pred
+```
+
+```{r, echo=FALSE, fig.dim=c(8,4)}
+# plot of the data with the forecast
+plot(ts, main="Forecast with \n Seasonal Differencing", xlab="Time",
+     ylab="Electricity Price", xlim=c(1978, 2027), ylim=c(0, 0.25))
+points(Time, predict.lm(model6), type='l', col='purple', lwd=2)
+abline(v=2024 + 1/12, col="blue", lty=2) # vertical line where prediction starts
+points(NewTime, final_forecast, type='l', col="red")
+legend("topleft", legend=c("original data", "fitted model (p=6)",
+                           "prediction"),
+       lty=1, col=c("black", "purple", "red"))
+mtext("Fig 27: SARIMA Model stacked on seasonal differencing of regression model",side=1,line=4)
+```
+
+```{r, include=FALSE}
+# save the orthogonal polynomials for the test set indices
+Time.test <- poly.Time[532:543, 1:6]
+  # get the seasonality of the test set
+season.test <- as.factor(cycle(Test))
+
+# matrix for the model using the test set
+ModelMatrix <- model.matrix(Test ~ Time.test + season.test)
+# # predict on the test set
+Pred.Claims <- coef(model) %*% t(ModelMatrix)
+
+# Predicting
+fore_residuals <- sarima.for(res_time_series, n.ahead=12, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+final_test_set_forecasted_values <- Pred.Claims + as.vector(fore_residuals$pred)
+
+# APSE
+apse_residual_model <- mean((as.vector(Test)-final_test_set_forecasted_values)^2)
+print(apse_residual_model)
+```
+
+The model based on seasonal differencing had an APSE of 6.77572e-05 and the one based on
+one-time differencing had an APSE of 1.12479e-04, which are not as good as 
+model 1 yielded from Box-Jenkins.
+
+# Conclusion
+
+The model with the best forecast based on the lowest APSE score was the 
+Double Exponential Smoothing model with an APSE of 4.137981e-06. However, since the 
+residuals were found to be non-stationary, the SARIMA(0,1,5)x(0,1,1)12 model
+that was discovered in the Box-Jenkins section could be an alternative with 
+a higher APSE but stationary residuals.
+
+Referring to all of the forecasts that were done throughout the report (Fig [x],
+[x], [x]), we can see that electricity prices in the next two years are 
+predicted to increase along with some seasonality. These patterns are important
+information crucial for homeowners to assist in their financial planning, make
+energy efficient investments in their appliances and policy makers make informed
+decisions to implement energy efficient programs. Rising electricity prices may
+ultimately incentivize businesses and homeowners to reduce their carbon 
+footprint by using less electricity or investing in renewable energy sources.
+
+\newpage
+
+# Appendix
+
+## Exploratory Data Analysis
+```{r, echo=FALSE}
+seg = c( rep(1:4, each=109), rep(5, 107))
+fligner.test(data$PRICE, seg)
+```
+
+Fig 28: Fligner-Killeen test of electricity price data
+
+```{r, echo=FALSE}
+ggplot(data, aes(DATE, log(PRICE))) +
+  geom_point(size=1) +
+  labs(title="Log Time Series of Electricity Price in the US", y="Price (cents)")+
+  labs(caption="Fig [x]: Log transformed time series of electricity price per kilowatt hour in the US") +
+  theme(plot.caption=element_text(hjust=0.5))
+```
+
+
+```{r, echo=FALSE}
+seg = c( rep(1:4, each=109), rep(5, 107))
+fligner.test(log(data$PRICE), seg)
+```
+
+Fig 29: Fligner-Killeen test of log transformed electricity price data
+
+```{r, echo=FALSE}
+names(avg_price_month)[names(avg_price_month) == "Group.1"] <- "Month"
+names(avg_price_month)[names(avg_price_month) == "x"] <- "Price"
+avg_price_month
+```
+Fig 30: Table of average price per month
+
+```{r, echo=FALSE, results="hide", message=FALSE, out.width="50%"}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+data %>%
+  group_by(MONTH) %>%
+  summarize(m = mean(PRICE, na.rm=TRUE),
+            sd = sd(PRICE, na.rm=TRUE)) %>%
+
+  ggplot(.) +
+  aes(x = MONTH, y = m, ymin = m - sd, ymax = m + sd, , na.rm=TRUE) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(position = position_dodge(width = 0.5)) +
+  labs(title="Mean Electricity Price by Month", x="Month", y="Mean Price") +
+  scale_x_continuous(breaks = seq(1, 12, by = 1)) +
+  labs(caption="Fig [x]: Average electricity price for all the months with a 95% confidence interval") +
+  theme(plot.caption=element_text(hjust=0.5))
+```
+
+```{r, echo=FALSE, out.width="70%"}
+ggplot(data, aes(DATE, PRICE)) +
+  geom_point(size=1) +
+  labs(title="Time Series of Electricity Price in the US", y="Price (cents)") +
+  geom_vline(xintercept = date_splits5[1], color = "blue", size=0.5) +
+  geom_vline(xintercept = date_splits5[2], color = "blue", size=0.5) +
+  geom_vline(xintercept = date_splits5[3], color = "blue", size=0.5) +
+  geom_vline(xintercept = date_splits5[4], color = "blue", size=0.5) +
+  geom_vline(xintercept = date_splits5[5], color = "blue", size=0.5) +
+  geom_vline(xintercept = date_splits5[6], color = "blue", size=0.5) +
+  geom_text(x=as.Date("1983-01-01"), y=0.15, label="var=1.26e-4",color="red") +
+  geom_text(x=as.Date("1992-01-01"), y=0.15, label="var=3.45e-5",color="red") +
+  geom_text(x=as.Date("2002-01-01"), y=0.15, label="var=3.12e-5",color="red") +
+  geom_text(x=as.Date("2011-01-01"), y=0.15, label="var=6.70e-5",color="red") +
+  geom_text(x=as.Date("2020-01-01"), y=0.15, label="var=1.49e-4",color="red") +
+  geom_text(x=as.Date("1983-01-01"), y=0.125, label="mean=0.072",color="orange") +
+  geom_text(x=as.Date("1992-01-01"), y=0.125, label="mean=0.088",color="orange") +
+  geom_text(x=as.Date("2002-01-01"), y=0.125, label="mean=0.092",color="orange") +
+  geom_text(x=as.Date("2011-01-01"), y=0.125, label="mean=0.127",color="orange") +
+  geom_text(x=as.Date("2020-01-01"), y=0.125, label="mean=0.143",color="orange") +
+  labs(caption="Fig 2: Dividing the time series into 5 equal sections and checking each one's variance and mean") +
+  theme(plot.caption=element_text(hjust=0.5))
+```
+```{r, echo=FALSE}
+#install.packages("lubridate")
+library(lubridate)
+data$MONTH <- month(data$DATE)
+avg_price_month = aggregate(data$PRICE, list(data$MONTH), FUN=mean, na.rm=TRUE)
+ggplot(data, aes(x=MONTH, y=PRICE)) +
+  geom_bar(stat="summary", fun.y=mean, fill = "#FF6666") +
+  labs(title="Mean Electricity Price by Month", x="Month", y="Mean Price") +
+  scale_x_continuous(breaks = seq(1, 12, by = 1))+
+  labs(caption="Fig [x]: Average electricity price for all the months") +
+  theme(plot.caption=element_text(hjust=0.5))
+```
+
+
+## Regression
+
+### Choice of orthogonal polynomials
+
+We check correlation of regular polynomials:
+
+```{r, echo=FALSE, fig.height=8}
+## checking for multicolinearity
+
+# number of degrees
+d <- 15
+# time indices
+Time <- as.vector(time(ts))
+
+# the polynomials from degree 1 to d on all the time data
+tpoly.raw <- poly(Time, d, raw=TRUE)
+
+# checking for correlation
+X.raw = matrix(tpoly.raw, ncol=d) # design matrix
+
+pairs(X.raw) # correlation plot
+mtext("Fig [x]: Correlation plot of regular polynomials", side=1, line=4, cex=0.8)
+```
+
+From the correlation plot, we can see that there is high linear
+correlation between the columns of the design matrix when using regular
+polynomials, so let's try orthogonal polynomials and check the correlation of
+their corresponding design matrix columns.
+
+```{r, echo=FALSE, fig.height=8}
+# the orthogonal polynomials for degrees 1 to d over the entire time data
+tpoly.ortho <- poly(Time, d, raw=FALSE)
+
+# checking for correlation
+X.ortho <- matrix(tpoly.ortho, ncol=d) # design matrix
+
+pairs(X.ortho) # correlation plot
+mtext("Fig 31: Correlation plot of orthogonal polynomials", side=1, line=4, cex=0.8)
+```
+
+From the correlation plot, there is no evidence of
+linear relationship between the columns of the design matrix when using the
+orthogonal polynomials.
+
+Therefore, orthogonal polynomials were used throughout the regression portion
+of this analysis.
+
+### CV Error plots for regularized models
+
+We plot the CV errors vs the degree for each alpha.
+
+```{r, echo=FALSE, fig.dim=c(8,6)}
+# the degrees
+p <- 1:15
+
+par(mfrow=c(2,3))
+## cv error vs p
+plot(p, cv.errors.ridge,
+     main="CV Errors for alpha=0 for degrees p=1 to 15", cex.main=0.8,
+     xlab="degree", ylab="CV Error", cex.lab = 0.8) # CV Errors for alpha = 0
+abline(v=which.min(cv.errors.ridge), col="red", lty=2) # vertical line at the degree with the minimum error
+mtext("Fig 32: CV errors plot for alpha=0", side=1, line=4, cex=0.8)
+
+plot(p, cv.errors.025,
+     main="CV Errors for alpha=0.25 for degrees p=1 to 15", cex.main=0.8,
+     xlab="degree", ylab="CV Error", cex.lab = 0.8) # CV Errors for alpha = 0.25
+abline(v=which.min(cv.errors.025), col="red", lty=2) # vertical line at the degree with the minimum error
+mtext("Fig 33: CV errors plot for alpha=0.25", side=1, line=4, cex=0.8)
+
+plot(p, cv.errors.05,
+     main="CV Errors for alpha=0.5 for degrees p=1 to 15", cex.main=0.8,
+     xlab="degree", ylab="CV Error", cex.lab = 0.8) # CV Errors for alpha = 0.5
+abline(v=which.min(cv.errors.05), col="red", lty=2) # vertical line at the degree with the minimum error
+mtext("Fig 34: CV errors plot for alpha=0.5", side=1, line=4, cex=0.8)
+
+plot(p, cv.errors.075,
+     main="CV Errors for alpha=0.75 for degrees p=1 to 15", cex.main=0.8,
+     xlab="degree", ylab="CV Error", cex.lab = 0.8) # CV Errors for alpha = 0.75
+abline(v=which.min(cv.errors.075), col="red", lty=2) # vertical line at the degree with the minimum error
+mtext("Fig 35: CV errors plot for alpha=0.75", side=1, line=4, cex=0.8)
+
+plot(p, cv.errors.lasso,
+     main="CV Errors for alpha=1 for degrees p=1 to 15", cex.main=0.8,
+     xlab="degree", ylab="CV Error", cex.lab = 0.8) # CV Errors for alpha = 1
+abline(v=which.min(cv.errors.lasso), col="red", lty=2) # vertical line at the degree with the minimum error
+mtext("Fig 36: CV errors plot for alpha=1", side=1, line=4, cex=0.8)
+```
+
+### Graphical Residual diagnostics for regularized models
+
+Here are the graphical residual diagnostics for the degree 15 model with alpha=0.25:
+
+```{r, include=FALSE}
+# season for entire data
+s <- as.factor(cycle(ts))
+s <- model.matrix(~0 + s)
+
+d <- 15
+# orthogonal polynomials for entire dataset
+X <- poly(Time, d)[, 1:d]
+# data sets for the optimal degree polynomials for best models with seasonality
+X.data.025 <- cbind(X[, 1:which.min(cv.errors.025)], s)
+X.data.05 <- cbind(X[, 1:which.min(cv.errors.05)], s)
+X.data.075 <- cbind(X[, 1:which.min(cv.errors.075)], s)
+X.data.lasso <- cbind(X[, 1:which.min(cv.errors.lasso)], s)
+
+# y data for entire dataset
+Y.data <- as.matrix(ts, ncol=1)
+
+# fit the best models on the entire data
+model.025 <- glmnet(X.data.025, Y.data,
+                      lambda=lambdas.025[which.min(cv.errors.025)],
+                      alpha=0.25, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+model.05 <- glmnet(X.data.05, Y.data,
+                      lambda=lambdas.05[which.min(cv.errors.05)],
+                      alpha=0.5, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+model.075 <- glmnet(X.data.075, Y.data,
+                      lambda=lambdas.075[which.min(cv.errors.075)],
+                      alpha=0.75, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+model.lasso <- glmnet(X.data.lasso, Y.data,
+                      lambda=lambdas.lasso[which.min(cv.errors.lasso)],
+                      alpha=1, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+# get the fitted values for each model
+fitted.025 <- predict(model.025, newx=X.data.025, type="response")
+fitted.05 <- predict(model.05, newx=X.data.05, type="response")
+fitted.075 <- predict(model.075, newx=X.data.075, type="response")
+fitted.lasso <- predict(model.lasso, newx=X.data.lasso, type="response")
+
+# residuals for each model
+res.025 <- Y.data-fitted.025
+res.05 <- Y.data-fitted.05
+res.075 <- Y.data-fitted.075
+res.lasso <- Y.data-fitted.lasso
+```
+
+```{r, echo=FALSE}
+# model diagnostics for best regularized models
+# Graphical model diagnostics
+par(mfrow=c(2,2))
+## plot of residuals vs fitted values
+plot(fitted.025, res.025 , pch=16 ,
+     col=adjustcolor("black",0.5),
+     main="residuals vs fitted values",
+     xlab="fitted values", ylab="residuals")
+abline(h=0,col="red" , lty=2, lwd=2) # horizontal line at 0
+mtext("Fig 37: Residuals vs fitted values plot", side=1, line=4, cex=0.8)
+
+## qq-plot of residuals
+qqPlot(res.025 , pch=16 , col=adjustcolor("black",0.7),
+            xlab = "Theoretical Quantiles (Normal)" ,
+            ylab = "Sample Quantiles (r.hat)",
+            main = "Normal Q-Q Plot",
+            id=FALSE) # suppress R console output of outlier ids
+mtext("Fig 38: QQplot of residuals", side=1, line=4, cex=0.8)
+
+## plotting the residuals vs time
+plot(res.025, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+abline(h=0,col="red" , lty=2, lwd=2) # plotting a horizontal line at 0
+mtext("Fig 39: Residuals vs time plot", side=1, line=4, cex=0.8)
+
+## acf plot of residuals
+acf(res.025, main="ACF Plot of Residuals")
+mtext("Fig 40: ACF plot of residuals", side=1, line=4, cex=0.8)
+```
+
+I notice a fanning out shape on the residuals vs fitted values plot,
+suggesting non-constant variance of the residuals.
+
+There are a lot of data points outside of the confidence band in the QQplot,
+suggesting the residuals may not be normal.
+
+There is some fanning of the residuals in the residuals vs time plot,
+suggesting non-constant variance.
+
+We see what appears to be some linear decay in the ACF plot, meaning there
+is some trend left and the residuals are not stationary.
+
+
+We note that in the alpha=0.25, alpha=0.5, alpha=0.75 and alpha=1 cases,
+the APSE was minimized at degree 15, with optimal lambda=0. This implies that
+the chosen alpha value is meaningless and the model is the same in all of these
+cases. In particular, this means that the residuals are the exact same across
+these models and since the diagnostics were already performed, they are not
+repeated. We confirm that the residuals of all these models are identical:
+
+```{r}
+which(res.025-res.05 != 0) # all 0
+which(res.025-res.075 != 0) # all 0
+which(res.025-res.lasso != 0) # all 0
+```
+
+
+However, the diagnostics for the ridge regression model were skipped in the
+body of the report to save space. The details of those diagnostics are included
+here for completeness.
+
+```{r, include=FALSE}
+# season for entire data
+s <- as.factor(cycle(ts))
+s <- model.matrix(~0 + s)
+
+d <- 15
+# orthogonal polynomials for entire dataset
+X <- poly(Time, d)[, 1:d]
+# data set for the optimal degree polynomial for ridge regression, including seasonality
+X.data.ridge <- cbind(X[, 1:which.min(cv.errors.ridge)], s)
+
+# y data for entire dataset
+Y.data <- as.matrix(ts, ncol=1)
+
+# fit on the entire data
+model.ridge <- glmnet(X.data.ridge, Y.data,
+                      lambda=lambdas.ridge[which.min(cv.errors.ridge)],
+                      alpha=0, standardize=TRUE, intercept=TRUE,
+                      family="gaussian")
+
+# get the fitted values
+fitted.ridge <- predict(model.ridge, newx=X.data.ridge, type="response")
+
+# residuals
+res.ridge <- Y.data-fitted.ridge
+```
+
+```{r, echo=FALSE}
+# model diagnostics for ridge regression model
+# Graphical model diagnostics
+par(mfrow=c(2,2))
+## plot of residuals vs fitted values
+plot(fitted.ridge, res.ridge , pch=16 ,
+     col=adjustcolor("black",0.5),
+     main="residuals vs fitted values",
+     xlab="fitted values", ylab="residuals")
+abline(h=0,col="red" , lty=2, lwd=2) # horizontal line at 0
+mtext("Fig 41: Residuals vs fitted values plot", side=1, line=4, cex=0.8)
+
+## qq-plot of residuals
+qqPlot(res.ridge , pch=16 , col=adjustcolor("black",0.7),
+            xlab = "Theoretical Quantiles (Normal)" ,
+            ylab = "Sample Quantiles (r.hat)",
+            main = "Normal Q-Q Plot",
+            id=FALSE)
+mtext("Fig 42: QQplot of residuals", side=1, line=4, cex=0.8)
+
+## plotting the residuals vs time
+plot(res.ridge, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+abline(h=0,col="red" , lty=2, lwd=2) # plotting a horizontal line at 0
+mtext("Fig 43: Residuals vs time plot", side=1, line=4, cex=0.8)
+
+## acf plot of residuals
+acf(res.ridge, main="ACF Plot of Residuals")
+mtext("Fig 44: ACF plot of residuals", side=1, line=4, cex=0.8)
+```
+
+There seems to be a fanning out shape in the residuals vs fitted values plot,
+suggesting non-constant variance.
+
+A lot of points fall outside the confidence band of the QQplot,
+suggesting the data is not normal.
+
+It seems like there is non-constant variance in the residuals vs time plot.
+
+There is linear decay in the ACF plot, indicating there is still some trend
+and the residuals are not stationary.
+
+From these diagnostics, we concluded that the assumptions for this model were
+violated, which was stated in the main report.
+
+### Non-graphical residual diagnostics for all regression models
+
+#### Non-regularized degree 6 model
+
+Firstly, for the non-regularized degree 6 model:
+
+```{r, echo=FALSE}
+# Diagnostic Tests for Residuals
+
+# Testing normality with Shapiro-Wilk
+residuals.model6 = residuals(model6) #extracting the residuals
+#Shapiro-Wilk test of normality H0: residuals are normal
+shapiro.test(residuals.model6)
+```
+
+The small p-value indicates that there is strong evidence against the null
+hypothesis that the residuals are normal.
+
+```{r, echo=FALSE}
+# Testing Constant variance with Fligner-Killeen
+#First, 3 groups of 90 obs and 3 groups of 91 obs.
+# plotting the residuals vs time
+plot(model6$residuals, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+mtext("Fig 45: residuals vs time plot for Filgner-Killeen test with 6 groups", side=1, line=4, cex=0.8)
+abline(v=c(c(1:3)*90, c(4:5)*91) , col="red" , lwd=2, lty=2) # vertical lines for the chunks
+#creating 6 chunks to test variance homogeneity
+segments = factor(c(rep(1:3,each=90),rep(4:6, each=91)))
+# Fligner's test for H0:sigma1=sigma2=...=sigma6 (note that we made 6 chunks)
+fligner.test(residuals.model6 , segments)
+```
+
+The small p-value indicates that there is strong evidence against the null
+hypothesis of constant variance.
+
+```{r, echo=FALSE}
+# Testing Constant variance with Fligner-Killeen
+#Now, 9 groups of 45 obs and 3 groups of 46 obs.
+# plotting the residuals vs time
+plot(model6$residuals, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+mtext("Fig 46: Residuals vs time plot for Fligner-Killeen test with 12 groups", side=1, line=4, cex=0.8)
+abline(v=c(c(1:9)*45, c(10:11)*46) , col="red" , lwd=2, lty=2) # vertical lines for the chunks
+#creating 12 chunks to test variance homogeneity
+segments = factor(c(rep(1:9,each=45),rep(10:12, each=46)))
+# Fligner's test for H0:sigma1=sigma2=...=sigma12 (note that we made 12 chunks)
+fligner.test(residuals.model6 , segments)
+```
+
+The small p-value indicates that there is strong evidence against the null
+hypothesis of constant variance.
+
+```{r, echo=FALSE}
+# Testing randomness with difference sign test
+difference.sign.test(residuals.model6)
+```
+
+The small p-value indicates that there is strong evidence against the null
+hypothesis that the residuals are random.
+
+```{r, echo=FALSE}
+# Testing randomness with runs test
+runs.test(residuals.model6 , plot = TRUE)
+mtext("Fig 47: Runs test plot", side=1, line=4, cex=0.8)
+```
+
+The small p-value indicates that there is strong evidence against the null
+hypothesis that the residuals are random.
+
+#### Regularized degree 15 model
+
+Next, for the regularized degree 15 model (alpha=0.25, 0.5, 0.75 and 1 have the
+same residuals, so included here only once):
+
+```{r, echo=FALSE}
+# Diagnostic Tests for Residuals
+
+#Shapiro-Wilk test of normality H0: residuals are normal
+shapiro.test(res.025)
+```
+
+Since the p-value is greater than 0.05, but really close to 0.05, there is weak
+evidence against the null hypothesis that the residuals are normal.
+
+```{r, echo=FALSE}
+# Testing Constant variance with Fligner-Killeen
+#First, 3 groups of 90 obs and 3 groups of 91 obs.
+# plotting the residuals vs time
+plot(res.025, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+mtext("Fig 48: Residuals vs time plot for Fligner-Killen test with 6 groups", side=1, line=4, cex=0.8)
+abline(v=c(c(1:3)*90, c(4:5)*91) , col="red" , lwd=2, lty=2) # vertical lines for the chunks
+#creating 6 chunks to test variance homogeneity
+segments = factor(c(rep(1:3,each=90),rep(4:6, each=91)))
+# Fligner's test for H0:sigma1=sigma2=...=sigma6 (note that we made 6 chunks)
+fligner.test(res.025 , segments)
+```
+
+Since the p-value is small, there is strong evidence against the null hypothesis
+that the residuals have constant variance.
+
+```{r, echo=FALSE}
+# Testing Constant variance with Fligner-Killeen
+#Now, 9 groups of 45 obs and 3 groups of 46 obs.
+# plotting the residuals vs time
+plot(res.025, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+mtext("Fig 49: Residuals vs time plot for Fligner-Killeen test with 12 groups", side=1, line=4, cex=0.8)
+abline(v=c(c(1:9)*45, c(10:11)*46) , col="red" , lwd=2, lty=2) # vertical lines for the chunks
+#creating 6 chunks to test variance homogeneity
+segments = factor(c(rep(1:9,each=45),rep(10:12, each=46)))
+# Fligner's test for H0:sigma1=sigma2=...=sigma12 (note that we made 12 chunks)
+fligner.test(res.025 , segments)
+```
+
+Since the p-value is small, there is strong evidence against the null hypothesis
+of constant variance.
+
+```{r, echo=FALSE}
+# Testing randomness with difference sign test
+difference.sign.test(res.025)
+```
+
+Since the p-value is large, there is not enough evidence to reject the null
+hypothesis that the residuals are random. Recall, however, that the sign
+difference test does not consider the order/placement of the points,
+just their sign.
+
+```{r, echo=FALSE}
+# Testing randomness with runs test
+runs.test(res.025, plot = TRUE)
+mtext("Fig 50: Runs test plot", side=1, line=4, cex=0.8)
+```
+
+Since the p-value is small, there is strong evidence against the null
+hypothesis that the residuals are random.
+
+#### Regularized degree 13 model (alpha=0)
+
+Finally, for the regularized degree 13 model (alpha=0):
+
+```{r, echo=FALSE}
+# Diagnostic Tests for Residuals
+
+#Shapiro-Wilk test of normality H0: residuals are normal
+shapiro.test(res.ridge)
+```
+
+Since the p-value is small, there is evidence against the null hypothesis that
+the residuals are normal.
+
+```{r, echo=FALSE}
+# Testing Constant variance with Fligner-Killeen
+#First, 3 groups of 90 obs and 3 groups of 91 obs.
+# plotting the residuals vs time
+plot(res.ridge, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+mtext("Fig 51: Residuals vs time plot for Fligner-Killeen test with 6 groups", side=1, line=4, cex=0.8)
+abline(v=c(c(1:3)*90, c(4:5)*91) , col="red" , lwd=2, lty=2) # vertical lines for the chunks
+#creating 6 chunks to test variance homogeneity
+segments = factor(c(rep(1:3,each=90),rep(4:6, each=91)))
+# Fligner's test for H0:sigma1=sigma2=...=sigma6 (note that we made 6 chunks)
+fligner.test(res.ridge , segments)
+```
+
+Since the p-value is small, there is strong evidence against the null
+hypothesis of constant variance
+
+```{r, echo=FALSE}
+# Testing Constant variance with Fligner-Killeen
+#Now, 9 groups of 45 obs and 3 groups of 46 obs.
+# plotting the residuals vs time
+plot(res.ridge, pch=16 ,
+     col=adjustcolor("black",0.5), main="residuals vs time",
+     xlab="time", ylab="residuals")
+mtext("Fig 52: Residuals vs time plot for Fligner-Killeen test with 12 groups", side=1, line=4, cex=0.8)
+abline(v=c(c(1:9)*45, c(10:11)*46) , col="red" , lwd=2, lty=2) # vertical lines for the chunks
+#creating 6 chunks to test variance homogeneity
+segments = factor(c(rep(1:9,each=45),rep(10:12, each=46)))
+# Fligner's test for H0:sigma1=sigma2=...=sigma12 (note that we made 12 chunks)
+fligner.test(res.ridge , segments)
+```
+
+Since the p-value is small, there is strong evidence against the null hypothesis
+of constant variance.
+
+```{r, echo=FALSE}
+# Testing randomness with difference sign test
+difference.sign.test(res.ridge)
+```
+
+Since the p-value is large, there is not enough evidence to reject the null
+hypothesis that the residuals are random. Recall, however, that the sign
+difference test does not consider the order/placement of the points, just their sign.
+
+```{r, echo=FALSE}
+# Testing randomness with runs test
+runs.test(res.ridge, plot = TRUE)
+mtext("Fig [x]: Runs test plot", side=1, line=4, cex=0.8)
+```
+
+Since the p-value is small, there is strong evidence against the null hypothesis
+that the residuals are random.
+
+
+
+## Smoothing Methods
+
+### 1. Additive Holt Winters Method, no trend, no seasonality.
+
+```{r, include = FALSE}
+# Additive HW method
+hw.ad.train.es <- HoltWinters(train, gamma = F, beta = F, seasonal = "additive")
+hw.ad.train.es
+
+  # Make predictions on the test set
+  predictions1 <- predict(hw.ad.train.es, newdata = test, n.ahead=length(test))
+  
+  # APSE value
+  apse1 <- mean((test - predictions1)^2)
+apse1
+
+```
+
+
+```{r, include=FALSE}
+# predict 12 months ahead using training set
+predict.es <- predict(hw.ad.train.es, n.ahead = length(test), prediction.interval = T, level = 0.95)
+predict.es
+
+```
+
+#### Training Prediction Plot of the Additive Holt Winters Method, no trend, no seasonality.
+
+```{r, echo = FALSE}
+# plot of the training data along with the predictions for the next 12 months
+plot(hw.ad.train.es, predict.es, ylab = "Electricity Price", main = "US Electricity Price with Training Prediction")
+mtext("Fig 53: US Electricity Price with Training Prediction", side=1, line=4, cex=0.8)
+```
+
+
+#### Residuals of the Additive Holt Winters Method, no trend, no seasonality
+
+```{r, echo = FALSE}
+# calculating the residuals 
+res1 <- residuals(hw.ad.train.es)
+# ACF plot of residuals
+acf(res1, main = "ACF Plot")
+mtext("Fig 54: ACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+```
+
+There appears to be slow decay in the lag of season of the ACF Plot for Figure 54, hence the residuals are non-stationary.
+
+
+
+### 2. Additive Holt Winters Method with both trend and seasonality.
+
+```{r, include=FALSE}
+# Additive HW method
+hw.ad.train <- HoltWinters(train, seasonal = "additive")
+hw.ad.train
+
+  # Make predictions on the test set
+  predictions3 <- predict(hw.ad.train, newdata = test, n.ahead=length(test))
+  
+  # APSE value
+  apse3 <- mean((test - predictions3)^2)
+apse3
+
+```
+
+
+
+```{r, include=FALSE}
+# predicting for the next 12 months using the training set
+pred.ad <- predict(hw.ad.train, n.ahead = length(test), prediction.interval = T, level = 0.95)
+pred.ad
+
+
+```
+
+#### Training Prediction Plot of the Additive Holt Winters Method with both trend and seasonality.
+
+```{r, echo = FALSE}
+# plot of the training set with the predicted values 
+plot(hw.ad.train, pred.ad, ylab = "Electricity Price", main = "US Electricity Price with Training Prediction")
+mtext("Fig 55: US Electricity Price with Training Prediction", side=1, line=4, cex=0.8)
+```
+
+
+
+#### Residuals of the additive Holt Winters model with both trend and seasonality. 
+
+```{r, echo = FALSE}
+# residuals of the HW model
+res3 <- residuals(hw.ad.train)
+# acf plot of the residuals
+acf(res3, main = "ACF plot")
+mtext("Fig 56: ACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+```
+
+There is no sign of linear decay, periodic pattern or decay in the lag of season of the ACF Plot in Figure 56, so we conclude that the residuals are stationary.
+
+
+### 3. Multiplicative Holt Winters Method with both trend and seasonality.
+
+```{r, include=FALSE}
+# Multiplicative Holt Winters method
+hw.mul.train <- HoltWinters(train, seasonal = "multiplicative")
+
+  # Make predictions on the test set
+  predictions4 <- predict(hw.mul.train, n.ahead=length(test))
+  
+  # APSE value
+  apse4 <- mean((test - predictions4)^2)
+apse4
+
+```
+
+
+
+```{r, include=FALSE}
+# predicting for the next 12 months using the training set
+pred.mul <- predict(hw.mul.train, n.ahead = length(test), prediction.interval = T, level = 0.95)
+pred.mul
+
+```
+
+#### Training Prediction Plot of the Multiplicative Holt Winters Method with both trend and seasonality.
+
+```{r, echo = FALSE}
+# plot of the training set with the predicted values 
+plot(hw.mul.train, pred.mul, ylab = "Electricity Price", main = "US Electricity Price with Training Prediction")
+mtext("Fig 57: US Electricity Price with Training Prediction", side=1, line=4, cex=0.8)
+```
+
+
+Restricting the y-axis of Figure 57 so we can see the fit better.
+
+```{r, echo = FALSE}
+# restricting the y-axis
+plot(hw.mul.train, pred.mul, ylim = c(0,0.25), ylab = "Electricity Price", main = "US Electricity Price with Training Prediction")
+mtext("Fig 58: US Electricity Price with Training Prediction", side=1, line=4, cex=0.8)
+```
+
+
+
+#### Residuals of the Multiplicative Holt Winters Method with both trend and seasonality.
+
+```{r, echo = FALSE}
+# Residuals of the HW model
+res4 <- residuals(hw.mul.train)
+# acf plot of the residuals
+acf(res4, main = "ACF plot")
+mtext("Fig 59: ACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+```
+
+There is no sign of linear decay, periodic pattern or decay in the lag of season of Figure 59 so we conclude that the residuals are stationary.
+
+
+### 4. Multiplicative Holt Winters Method with seasonality but not trend.
+
+```{r, include=FALSE}
+# Multiplicative Holt Winters method
+hw.mul.train.season <- HoltWinters(train, beta = F, seasonal = "multiplicative")
+
+  # Make predictions on the test set
+  predictions5 <- predict(hw.mul.train.season, n.ahead=length(test))
+  
+  # APSE value
+  apse5 <- mean((test - predictions5)^2)
+apse5
+
+```
+
+
+```{r, include=FALSE}
+# predicting for the next 12 months using the training set
+pred.mul.season <- predict(hw.mul.train.season, n.ahead = length(test), prediction.interval = T, level = 0.95)
+pred.mul.season
+
+```
+
+#### Training Prediction Plot of the Multiplicative Holt Winters Method with seasonality but not trend.
+
+```{r, echo = FALSE}
+# plot of the training set with the predicted values 
+plot(hw.mul.train.season, pred.mul.season, ylab = "Electricity Price", main = "US Electricity Price with Training Prediction")
+
+mtext("Fig 60: US Electricity Price with Training Prediction", side=1, line=4, cex=0.8)
+```
+
+#### Residuals of the Multiplicative Holt Winters Method with seasonality but not trend.
+
+```{r, echo = FALSE}
+# Residuals of the HW model
+res5 <- residuals(hw.mul.train.season)
+# ACF plot of the residuals
+acf(res5, main = "ACF plot")
+mtext("Fig 61: ACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+```
+
+
+There is no sign of linear decay, periodic pattern or decay in the lag of season in the ACF Plot in Figure 61, so we conclude that the residuals are stationary.
+
+
+### 5. Additive Holt Winters Method with seasonality but not trend.
+
+```{r, include=FALSE}
+# Additive Holt Winters method
+hw.ad.train.season <- HoltWinters(train, beta = F, seasonal = "additive")
+
+  # Make predictions on the test set
+  predictions6 <- predict(hw.ad.train.season, n.ahead=length(test))
+  
+  # APSE value
+  apse6 <- mean((test - predictions6)^2)
+apse6
+
+```
+
+
+
+```{r, include=FALSE}
+# predicting for the next 12 months using the training set
+pred.ad.season <- predict(hw.ad.train.season, n.ahead = length(test), prediction.interval = T, level = 0.95)
+pred.ad.season
+
+```
+
+#### Training Prediction Plot of the Additive Holt Winters Method with seasonality but not trend.
+
+```{r, echo = FALSE}
+# plot of the training set with the predicted values 
+plot(hw.ad.train.season, pred.ad.season, ylab = "Electricity Price", main = "US Electricity Price with Training Prediction")
+mtext("Fig 62: US Electricity Price with Training Prediction", side=1, line=4, cex=0.8)
+
+```
+
+#### Residuals of the Additive Holt Winters Method with seasonality but not trend.
+
+```{r, echo = FALSE}
+# residuals of the HW model
+res6 <- residuals(hw.ad.train.season)
+# ACF plot of the residuals 
+acf(res6)
+mtext("Fig 63: ACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+
+```
+
+There is no sign of linear decay, periodic pattern or decay in the lag of season in the ACF Plot in Figure 63, so we conclude that the residuals are stationary.
+
+
+## Box-Jenkins
+### Variance analysis of combined difference data
+We will look at the plot of the ACF of the squared combined difference data:
+```{r, echo=FALSE}
+acf(combined_diff^2, lag.max=100, main = "ACF of differenced data squared for variance analysis")
+```
+Note that the ACF plot of the data squared does not exhibit any trends, indicating that there is constant variance.
+
+### Additional SARIMA model proposals
+* Proposal 2: $SARIMA(0, 1, 5) \cdot (2, 1, 0)_{12}$: We use the same justification for the regular differencing ARIMA model. If we only look at the seasonal lags, the ACF plots can be considered exponentially decreasing the the PACF plot cuts off after the second seasonal lag, justifying P = 2 and Q = 0
+* Proposal 3: $SARIMA(1, 1, 1) \cdot (0, 1, 1)_{12}$: If we only look at the ACF and the PACF of the regularly differenced data, we can claim that both plots exhibit exponential decay or sinusoidal damping patterns. Thus, we can propose an ARMA(1, 1) model for the regular differenced data. We use the same justification as Proposal 1 for the seasonal ARIMA model.
+* Proposal 4: $SARIMA(1, 1, 1) \cdot (2, 1, 0)_{12}$: We can propose an ARIMA(1, 1) model for the regular differenced data based off the same justification as Proposal 3. We use the same justification as Proposal 2 for the seasonal ARIMA model.
+* Proposal 5: $SARIMA(1, 1, 2) \cdot (0, 1, 1)_{12}$: Varying the ARMA model parameters for the regular differenced ARMA model.
+* Proposal 6: $SARIMA(2, 1, 1) \cdot (0, 1, 1)_{12}$: Varying the ARIMA model parameters for the regular differenced ARIMA model.
+* Proposal 7: $SARIMA(1, 1, 2) \cdot (2, 1, 0)_{12}$: Varying the ARIMA model parameters for the regular differenced ARIMA model. We'll use the same ARMA model parameters for the seasonally differenced data as proposal 4.
+* Proposal 8: $SARIMA(1, 1, 1) \cdot (1, 1, 1)_{12}$: Varying the ARIMA model parameters for the regular differenced ARIMA model. We can also propose an ARMA model for the seasonal differenced data as the ACF and PACF plots both look like they are exponentially decreasing or sinusoidally damped.
+* Proposal 9: $SARIMA(1, 1, 1) \cdot (1, 1, 2)_{12}$: Varying the ARMA model parameters for both ARIMA models.
+* Proposal 10: $SARIMA(1, 1, 1) \cdot (2, 1, 1)_{12}$: Varying the ARMA model parameters for both ARIMA models.
+
+### Model 11 and 12 model diagnostics
+```{r, echo = FALSE, results = 'hide'}
+sarima(training_ts, p=2, d=1, q=1, P=2, D=1, Q=1, S=12)
+```
+
+We immediately note that there are some spikes in the ACF graph of the residuals and the p-values of the Ljung-Box test are all significant. This indicates that there is still some correlation that the model does not sufficiently model. Also note that the residuals are not closely following the line in the Q-Q plot, indicating that the residuals are not normally distributed. Model 11 violates its assumptions. Model 12 follows a similar conclusion, as can be seen here:
+```{r, echo=FALSE, results = 'hide'}
+sarima(training_ts, p=1, d=1, q=2, P=2, D=1, Q=1, S=12)
+```
+### Seasonal differenced SARIMA
+We will redo the SARIMA modelling with just one-time seasonal differencing. Since we have a exponential decay in our ACF plot and the PACF plot cuts off after a certain lag (as evidenced in section 3), we can propose the following models:
+
+* p = 7, q = 0, P = 2, q = 0, d = 0, D = 1, S = 12
+* p = 1, q = 1, P = 2, q = 0, d = 0, D = 1, S = 12
+* p = 2, q = 1, P = 2, q = 0, d = 0, D = 1, S = 12
+* p = 1, q = 2, P = 2, q = 0, d = 0, D = 1, S = 12
+* p = 1, q = 1, P = 1, q = 1, d = 0, D = 1, S = 12
+
+After fitting all of these models, we compare the models based off AICc:
+```{r, echo = FALSE}
+sarima_model_1 <- sarima(training_ts, p=7, d=0, q=0, P=2, D=1, Q=0, S=12, details=FALSE)
+sarima_model_2 <- sarima(training_ts, p=1, d=0, q=1, P=2, D=1, Q=0, S=12, details=FALSE)
+sarima_model_3 <- sarima(training_ts, p=2, d=0, q=1, P=2, D=1, Q=0, S=12, details=FALSE)
+sarima_model_4 <- sarima(training_ts, p=1, d=0, q=2, P=2, D=1, Q=0, S=12, details=FALSE)
+sarima_model_5 <- sarima(training_ts, p=1, d=0, q=1, P=1, D=1, Q=1, S=12, details=FALSE)
+
+aicc_values <- c(
+ sarima_model_1$IC[2],
+ sarima_model_2$IC[2],
+ sarima_model_3$IC[2],
+ sarima_model_4$IC[2],
+ sarima_model_5$IC[2]
+)
+
+
+model_aic_df <- data.frame(
+ Model = c("sarima_model_1", "sarima_model_2", "sarima_model_3", "sarima_model_4", "sarima_model_5"),
+ AICc = aicc_values
+)
+
+# Sort the data frame by AIC values
+model_aic_df <- model_aic_df[order(model_aic_df$AICc), ]
+
+# Select the top 3 models
+top_3_models <- model_aic_df[1:3, ]
+
+# top_3_models
+top_3_models
+```
+From the AICc results, we see that Model 5, 1 and 4 are the top performing models. We will now perform model diagnostics on each to see if residual diagnostics pass across all models. For Model 5, we have the following diagnostics
+
+```{r, echo=FALSE, results='hide'}
+sarima(training_ts, p=1, d=0, q=1, P=1, D=1, Q=1, S=12)
+```
+Figure 64: Model 5 residual plots
+
+For Model 1, we have:
+```{r, echo=FALSE, results='hide'}
+sarima(training_ts, p=7, d=0, q=0, P=2, D=1, Q=0, S=12)
+```
+Figure 65: Model 1 residual plots
+
+For Model 4, we have:
+```{r}
+sarima(training_ts, p=1, d=0, q=2, P=2, D=1, Q=0, S=12)
+```
+Figure 66: Model 4 residual plots
+
+Across all 3 models, we notice that the p-values for the Ljung-Box test are significant, indicating that the proposed models do not capture all autocorrelations effectively. Hence, we will stop using one-timed seasonal differencing for SARIMA modelling.
+
+Let's now analyze model 11:
+
+```{r, echo = FALSE, results = 'hide'}
+fig.dim = c(8, 4)
+sarima(training_ts, p=2, d=1, q=1, P=2, D=1, Q=1, S=12)
+```
+Figure 67: Model 11 residual plot
+
+We immediately note that there are some spikes in the ACF graph of the residuals and the p-values of the Ljung-Box test are all significant. This indicates that there is still some correlation that the model does not sufficiently model. Also note that the residuals are not closely following the line in the Q-Q plot, indicating that the residuals are not normally distributed. Model 11 violates its assumptions. Similar results are found in model 12 (can be found in the appendix section titled "Model 12 model diagnostics").
+
+
+Even though Model 11 and 12 have violated assumptions, we are still going to evaluate APSE on all three chosen models. We will only use Model 1 for forecasting the next 2 years of data.
+
+Let's forecast each model on the test dataset, which is a 12-step ahead prediction.
+```{r, echo = FALSE}
+par(mfrow=c(1, 3))
+fig.dim = c(8, 4)
+fore1 <- sarima.for(training_ts, n.ahead=12, p=0, d=1, q=5, P=0, D=1, Q=1, S=12)
+title("Model 1 Test Set Forecast")
+fore11 <- sarima.for(training_ts, n.ahead=12, p=2, d=1, q=1, P=2, D=1, Q=1, S=12)
+title("Model 11 Test Set Forecast")
+fore12 <- sarima.for(training_ts, n.ahead=12, p=1, d=1, q=2, P=2, D=1, Q=1, S=12)
+title("Model 12 Test Set Forecast")
+```
+Figure 68: Model 1, 11, 12 forecasts on test set
+
+```{r, include = FALSE}
+aicc_values <- c(
+ sarima_model_1$IC[2],
+ sarima_model_2$IC[2],
+ sarima_model_3$IC[2],
+ sarima_model_4$IC[2],
+ sarima_model_5$IC[2],
+ sarima_model_6$IC[2],
+ sarima_model_7$IC[2],
+ sarima_model_8$IC[2],
+ sarima_model_9$IC[2],
+ sarima_model_10$IC[2],
+ sarima_model_11$IC[2],
+ sarima_model_12$IC[2]
+)
+model_values <- c("sarima_model_1", "sarima_model_2", "sarima_model_3", "sarima_model_4", "sarima_model_5", "sarima_model_6", "sarima_model_7", "sarima_model_8", "sarima_model_9", "sarima_model_10", "sarima_model_11", "sarima_model_12")
+
+
+model_aic_df <- data.frame(
+ Model = c("sarima_model_1", "sarima_model_2", "sarima_model_3", "sarima_model_4", "sarima_model_5", "sarima_model_6", "sarima_model_7", "sarima_model_8", "sarima_model_9", "sarima_model_10", "sarima_model_11", "sarima_model_12"),
+ AICc = aicc_values
+)
+
+# Sort the data frame by AIC values
+model_aic_df <- model_aic_df[order(model_aic_df$AICc), ]
+
+# Select the top 3 models
+top_3_models <- model_aic_df[1:3, ]
+
+# top_3_models
+top_3_models
+```
+## Combination
+
+```{r}
+# get the seasonality of the training set
+  season <- as.factor(cycle(Training))
+  # save the orthogonal polynomials for the train set indices
+  Time.training <- poly.Time[1:531, 1:6]
+  # fit model on training set using orthogonal polynomials subsetted on the
+  #  train set and the seasonal factor
+  model <- lm(Training ~ Time.training + season)
+```
+
+```{r}
+acf(model$residuals)
+```
+Fig 69: acf of residuals of regression model
+```{r}
+acf(diff(model$residuals))
+```
+Fig 70: acf of one time difference of regression model
+```{r}
+# Let's diff on season only
+acf(diff(model$residuals, lag=12))
+```
+Fig 71: acf of seasonal + one time difference 
+```{r}
+# Exponential decay! Looks good. Let's do PACF
+pacf(diff(model$residuals, lag=12))
+```
+Fig 72: pacf of seasonal + one time difference
+```{r}
+# Choosing SARIMA
+# p: 6, 6, 1, 1, 1, 1
+# q: 0, 0, 1, 1, 1, 2
+# d: 0
+# P: 2, 0, 1, 0, 1, 1
+# Q: 0, 1, 0, 2, 1, 2
+# D: 1
+res_time_series <- ts(model$residuals, frequency = 12)
+```
+
+```{r}
+sarima_model1_residuals <- sarima(res_time_series, p = 6, q = 0, d = 0, P = 2, D = 1, Q = 0, S = 12)
+```
+
+```{r}
+sarima_model2_residuals <- sarima(res_time_series, p = 6, q = 0, d = 0, P = 0, D = 1, Q = 1, S = 12)
+```
+
+```{r}
+sarima_model3_residuals <- sarima(res_time_series, p = 1, q = 1, d = 0, P = 1, D = 1, Q = 0, S = 12)
+```
+
+```{r}
+sarima_model4_residuals <- sarima(res_time_series, p = 1, q = 1, d = 0, P = 0, D = 1, Q = 2, S = 12)
+```
+
+```{r}
+sarima_model5_residuals <- sarima(res_time_series, p = 1, q = 1, d = 0, P = 1, D = 1, Q = 1, S = 12)
+```
+
+```{r}
+sarima_model6_residuals <- sarima(res_time_series, p = 1, q = 2, d = 0, P = 1, D = 1, Q = 2, S = 12)
+```
+Fig 73-78: other SARIMA models fit
+```{r}
+# Only Model 2 did well
+# Let's look at APSE
+
+# save the orthogonal polynomials for the test set indices
+Time.test <- poly.Time[532:543, 1:6]
+  # get the seasonality of the test set
+season.test <- as.factor(cycle(Test))
+
+# matrix for the model using the test set
+ModelMatrix <- model.matrix(Test ~ Time.test + season.test)
+# # predict on the test set
+Pred.Claims <- coef(model) %*% t(ModelMatrix)
+
+# Predicting
+fore_residuals <- sarima.for(res_time_series, n.ahead=12, p = 6, q = 0, d = 0, P = 0, D = 1, Q = 1, S = 12)
+final_test_set_forecasted_values <- Pred.Claims + as.vector(fore_residuals$pred)
+
+# APSE
+apse_residual_model <- mean((as.vector(Test)-final_test_set_forecasted_values)^2)
+print(apse_residual_model)
+```
+Fig 79: Residuals of model 2
+```{r}
+# Fitting full model
+# seasonality for the entire time series
+Season <- as.factor(cycle(ts))
+
+# fit the model of degree 6 on the entire data
+model6 <- lm(ts ~ poly(Time, 6) + Season)
+full_res_time_series <- ts(model6$residuals, frequency = 12)
+residual_model <- sarima(full_res_time_series, p = 6, q = 0, d = 0, P = 0, D = 1, Q = 1, S = 12)
+```
+
+```{r}
+# Forecasting next two years
+
+# next 24 months
+NewTime <- c(2024 + c(1:24)/12) # for when want to do future predictions 28.50 in a1 sols
+# seasons for next 24 months
+NewSeason <- factor(rep(c(2:12, 1),2))
+
+# data frame for forecast
+Forecast <- data.frame(Time=NewTime, Season=NewSeason)
+
+# forecast
+forecast.values <- predict.lm(model6, Forecast, interval='prediction')
+forecast.values.residuals <- sarima.for(full_res_time_series, n.ahead = 24, p = 0, q = 5, d = 1, P = 0, D = 1, Q = 2, S = 12)
+final_forecast <- forecast.values[,1] + forecast.values.residuals$pred
+```
+
+```{r}
+# plot of the data with the forecast
+plot(ts, main="Electricity Price in the US with 2 year forecast", xlab="Time",
+     ylab="Electricity Price", xlim=c(1978, 2027), ylim=c(0, 0.25))
+points(Time, predict.lm(model6), type='l', col='purple', lwd=2)
+abline(v=2024 + 1/12, col="blue", lty=2) # vertical line where prediction starts
+points(NewTime, final_forecast, type='l', col="red")
+legend("topleft", legend=c("original data", "fitted model (p=6)",
+                           "prediction"),
+       lty=1, col=c("black", "purple", "red"))
+```
+
+We will try differencing with a lag of 1
+
+```{r}
+acf(diff(model$residuals))
+```
+Fig 80: acf of one time differencing of regression model
+```{r}
+pacf(diff(model$residuals))
+```
+
+Here are the values we chose for SARIMA
+p=5, q=0 because the pacf cuts off at lag 5 and acf is exponentially decreasing
+P=1 because one could argue that the pacf cuts off at season 1
+P=2 because one could argue that the pacf cuts off at season 2
+Q=1 because one could argue that acf cuts off at season 1
+Q=2 because one could argue that acf cuts off at season 2
+Choosing SARIMA
+possible values
+p: 5
+q: 0
+d: 1 (one time differencing)
+P: 1 2 0 0
+Q: 0 0 1 2
+D: 0
+s = 12
+
+```{r}
+sarima_model7_residuals <- sarima(res_time_series, p = 5, q = 0, d = 1, P = 1, D = 0, Q = 0, S = 12)
+```
+
+```{r}
+sarima_model8_residuals <- sarima(res_time_series, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+```
+
+```{r}
+sarima_model9_residuals <- sarima(res_time_series, p = 5, q = 0, d = 1, P = 0, D = 0, Q = 1, S = 12)
+```
+
+```{r}
+sarima_model10_residuals <- sarima(res_time_series, p = 5, q = 0, d = 1, P = 0, D = 0, Q = 2, S = 12)
+```
+Fig 81 - 84: Other SARIMA models fit on seasonal differencing
+```{r}
+# Let's look at APSE for model 8
+# sarima_model8_residuals <- sarima(res_time_series, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+# save the orthogonal polynomials for the test set indices
+Time.test <- poly.Time[532:543, 1:6]
+  # get the seasonality of the test set
+season.test <- as.factor(cycle(Test))
+
+# matrix for the model using the test set
+ModelMatrix <- model.matrix(Test ~ Time.test + season.test)
+# # predict on the test set
+Pred.Claims <- coef(model) %*% t(ModelMatrix)
+
+# Predicting
+fore_residuals <- sarima.for(res_time_series, n.ahead=12, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+final_test_set_forecasted_values <- Pred.Claims + as.vector(fore_residuals$pred)
+
+# APSE
+apse_residual_model <- mean((as.vector(Test)-final_test_set_forecasted_values)^2)
+print(apse_residual_model)
+```
+
+```{r}
+# Fitting full model
+# seasonality for the entire time series
+Season <- as.factor(cycle(ts))
+
+# fit the model of degree 6 on the entire data
+model6 <- lm(ts ~ poly(Time, 6) + Season)
+full_res_time_series <- ts(model6$residuals, frequency = 12)
+residual_model <- sarima(full_res_time_series, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+```
+
+```{r}
+# Forecasting next two years
+
+# next 24 months
+NewTime <- c(2024 + c(1:24)/12) # for when want to do future predictions 28.50 in a1 sols
+# seasons for next 24 months
+NewSeason <- factor(rep(c(2:12, 1),2))
+
+# data frame for forecast
+Forecast <- data.frame(Time=NewTime, Season=NewSeason)
+
+# forecast
+forecast.values <- predict.lm(model6, Forecast, interval='prediction')
+forecast.values.residuals <- sarima.for(full_res_time_series, n.ahead = 24, p = 5, q = 0, d = 1, P = 2, D = 0, Q = 0, S = 12)
+final_forecast <- forecast.values[,1] + forecast.values.residuals$pred
+```
+
+```{r}
+# plot of the data with the forecast
+plot(ts, main="Electricity Price in the US with 2 year forecast", xlab="Time",
+     ylab="Electricity Price", xlim=c(1978, 2027), ylim=c(0, 0.25))
+points(Time, predict.lm(model6), type='l', col='purple', lwd=2)
+abline(v=2024 + 1/12, col="blue", lty=2) # vertical line where prediction starts
+points(NewTime, final_forecast, type='l', col="red")
+legend("topleft", legend=c("original data", "fitted model (p=6)",
+                           "prediction"),
+       lty=1, col=c("black", "purple", "red"))
+```
+```{r}
+# plot of the data with the forecast
+plot(ts, main="Forecast with \n One Time Differencing", xlab="Time",
+     ylab="Electricity Price", xlim=c(1978, 2027), ylim=c(0, 0.25))
+points(Time, predict.lm(model6), type='l', col='purple', lwd=2)
+abline(v=2024 + 1/12, col="blue", lty=2) # vertical line where prediction starts
+points(NewTime, final_forecast2, type='l', col="red")
+legend("topleft", legend=c("original data", "fitted model (p=6)",
+                           "prediction"),
+       lty=1, col=c("black", "purple", "red"))
+```
+
+Fig 85, 86: Forecast of SARIMA stacked on seasonal and one time differencing
+
+
+
+## Combination Method using Additive Double Exponential Smoothing Holt-Winters Model 
+
+
+
+### Making the Residuals of the DES HW Model Stationary
+
+```{r, echo = FALSE}
+# acf plot of the DES HW model residuals 
+acf(res2, main = "ACF Plot")
+mtext("Fig 87: ACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+```
+
+
+There is linear decay in the lag of season in the ACF Plot in Figure 87, hence the residuals are non-stationary.
+
+#### One time Regular Differencing
+
+```{r, echo = FALSE}
+# One time Regular Differencing on DES model
+diff.one <- diff(res2)
+
+# acf plot of regular differenced residuals
+acf(res2, main = "ACF Plot")
+mtext("Fig 88: ACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+```
+
+
+There is linear decay in the lag of season in the ACF Plot in Figure 88, hence the residuals are non-stationary.
+
+\newpage
+
+#### One Time Seasonal Differencing
+
+```{r, echo = FALSE}
+# One Time Seasonal Differencing
+diff.two <- diff(res2, lag = 12)
+# ACF Plot of seasonally differenced residuals
+acf(diff.two, main = "ACF Plot")
+
+
+mtext("Fig 89: ACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+```
+
+
+There are no signs of non-stationarity in the above ACF plot in Figure 89, hence our residuals are now stationary.
+
+\newpage
+
+
+```{r, echo = FALSE}
+# PACF plot of seasonally differenced residuals
+pacf(diff.two, main = "PACF Plot")
+mtext("Fig 90: PACF Plot of the Holt Winters Residuals", side=1, line=4, cex=0.8)
+```
+
+
+#### Model Proposal
+
+Since we seasonally differenced our residuals, immediately we know that D=1, s=12 and d=0.
+
+Looking at the above ACF and PACF plots, we can propose the following values for p,q,P and Q.
+
+For p and q, we ignore seasonal lags:
+
+The following are in reference to the ACF Plot in Figure 89 and the PACF plot in Figure 90. 
+
+One can argue that the ACF plot cuts off after lag 5 and there is immediate exponential decay in the PACF plot, therefore I will propose p = 0 and q = 5.
+
+One can argue that there is exponential decay in the ACF plot and the PACF plot cuts off after lag 5, therefore I will propose p = 5 and q = 0.
+
+One can argue that there is exponential decay in both the ACF plot and the PACF plot, therefore I will propose p = 1 and q = 1
+
+For P and Q we focus on the seasonal lags:
+
+One can argue that the ACF plot cuts off after lag 5 and there is immediate exponential decay in the PACF plot, therefore I will propose p = 0 and q = 1.
+
+One can argue that there is exponential decay in the ACF plot and the PACF plot cuts off after lag 2, therefore I will propose p = 2 and q = 0.
+
+One can argue that there is exponential decay in the lag of season in both the ACF plot and the PACF plot, therefore I will propose P = 1 and Q = 1
+
+Therefore I propose to fit a total of $3 \times 3 = 9$ models, those being:
+
+Model 1: $SARIMA(0,0,5)\times(0,1,1)_{12}$
+
+Model 2: $SARIMA(0,0,5)\times(2,1,0)_{12}$
+
+Model 3: $SARIMA(0,0,5)\times(1,1,1)_{12}$
+
+Model 4: $SARIMA(5,0,0)\times(0,1,1)_{12}$
+
+Model 5: $SARIMA(5,0,0)\times(2,1,0)_{12}$
+
+Model 6: $SARIMA(5,0,0)\times(1,1,1)_{12}$
+
+Model 7: $SARIMA(1,0,1)\times(0,1,1)_{12}$
+
+Model 8: $SARIMA(1,0,1)\times(2,1,0)_{12}$
+
+Model 9: $SARIMA(1,0,1)\times(1,1,1)_{12}$
+
+
+
+```{r, include = FALSE}
+# Creating a time series of the residuals for SARIMA modelling.
+res_time_series <- ts(res2, frequency = 12)
+
+```
+
+
+### Fitting the Combination HW SARIMA Models
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(0,0,5)x(0,1,1)_12
+sarima_model1_residuals <- sarima(res_time_series, p = 0, d = 0, q = 5, P = 0, D = 1, Q = 1, S = 12)
+mtext("Fig 91: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(0,0,5)x(2,1,0)_12
+sarima_model2_residuals <- sarima(res_time_series, p = 0, d = 0, q = 5, P = 2, D = 1, Q = 0, S = 12)
+mtext("Fig 92: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(0,0,5)x(1,1,1)_12
+sarima_model3_residuals <- sarima(res_time_series, p = 0, d = 0, q = 5, P = 1, D = 1, Q = 1, S = 12)
+mtext("Fig 93: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(5,0,0)x(0,1,1)_12
+sarima_model4_residuals <- sarima(res_time_series, p = 5, d = 0, q = 0, P = 0, D = 1, Q = 1, S = 12)
+mtext("Fig 94: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(5,0,0)x(2,1,0)_12
+sarima_model5_residuals <- sarima(res_time_series, p = 5, d = 0, q = 0, P = 2, D = 1, Q = 0, S = 12)
+mtext("Fig 95: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(5,0,0)x(1,1,1)_12
+sarima_model6_residuals <- sarima(res_time_series, p = 5, d = 0, q = 0, P = 1, D = 1, Q = 1, S = 12)
+mtext("Fig 96: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(1,0,1)x(0,1,1)_12
+sarima_model7_residuals <- sarima(res_time_series, p = 1, d = 0, q = 1, P = 0, D = 1, Q = 1, S = 12)
+mtext("Fig 97: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(1,0,1)x(2,1,0)_12
+sarima_model8_residuals <- sarima(res_time_series, p = 1, d = 0, q = 1, P = 2, D = 1, Q = 0, S = 12)
+mtext("Fig 98: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+```{r, echo = FALSE, results='hide'}
+# SARIMA(1,0,1)x(1,1,1)_12
+sarima_model9_residuals <- sarima(res_time_series, p = 1, d = 0, q = 1, P = 1, D = 1, Q = 1, S = 12)
+mtext("Fig 99: Residual Diagnostics for SARIMA", side=1, line=4, cex=0.8)
+```
+
+From the p-values for the Ljung-Box statistic in Figures 95,97,98 and 99, most p-values are below the 0.05 dotted line in the above plots so we will not further investigate models 5,7,8 and 9. We will continue investigation in models 1,2,3,4, and 6 as the majority of their p-values sit above the 0.05 line as can be seen in Figures 91,92,93,94 and 96.
+
+### APSE Calculations for Proposed Models
+
+Calulating the APSE value for Model 1 using the train/test APSE criterion method.
+
+```{r, echo = FALSE}
+# SARIMA(0,0,5)x(0,1,1)_12
+# predict 12 months ahead using the training set 
+predict.des <- predict(hw.ad.train.des, n.ahead = length(test), prediction.interval = T, level = 0.95)
+
+fore_residuals1 <- sarima.for(res_time_series, n.ahead = length(test),p = 0, d = 0, q = 5, P = 0, D = 1, Q = 1, S = 12)
+
+final_test_set_forecasted_values1 <- predict.des + as.vector(fore_residuals1$pred)
+
+# APSE
+apse_residual_model1 <- mean((as.vector(test)-final_test_set_forecasted_values1)^2)
+print(apse_residual_model1)
+
+```
+
+Calulating the APSE value for Model 2 using the train/test APSE criterion method.
+
+```{r, echo = FALSE}
+# SARIMA(0,0,5)x(2,1,0)_12
+# predict 12 months ahead using the training set 
+predict.des <- predict(hw.ad.train.des, n.ahead = length(test), prediction.interval = T, level = 0.95)
+
+fore_residuals2 <- sarima.for(res_time_series, n.ahead = length(test), p = 0, d = 0, q = 5, P = 2, D = 1, Q = 0, S = 12)
+
+
+final_test_set_forecasted_values2 <- predict.des + as.vector(fore_residuals2$pred)
+
+# APSE
+apse_residual_model2 <- mean((as.vector(test)-final_test_set_forecasted_values2)^2)
+print(apse_residual_model2)
+
+```
+
+Calulating the APSE value for Model 3 using the train/test APSE criterion method.
+
+```{r, echo = FALSE}
+# SARIMA(0,0,5)x(1,1,1)_12
+# predict 12 months ahead using the training set 
+predict.des <- predict(hw.ad.train.des, n.ahead = length(test), prediction.interval = T, level = 0.95)
+
+fore_residuals3 <- sarima.for(res_time_series, n.ahead = length(test), p = 0, d = 0, q = 5, P = 1, D = 1, Q = 1, S = 12)
+
+
+
+final_test_set_forecasted_values3 <- predict.des + as.vector(fore_residuals3$pred)
+
+# APSE
+apse_residual_model3 <- mean((as.vector(test)-final_test_set_forecasted_values3)^2)
+print(apse_residual_model3)
+
+```
+
+
+
+Calulating the APSE value for Model 4 using the train/test APSE criterion method.
+
+```{r, echo = FALSE}
+# SARIMA(5,0,0)x(0,1,1)_12
+# predict 12 months ahead using the training set 
+predict.des <- predict(hw.ad.train.des, n.ahead = length(test), prediction.interval = T, level = 0.95)
+
+fore_residuals4 <- sarima.for(res_time_series,n.ahead = length(test), p = 5, d = 0, q = 0, P = 0, D = 1, Q = 1, S = 12)
+
+final_test_set_forecasted_values4 <- predict.des + as.vector(fore_residuals4$pred)
+
+# APSE
+apse_residual_model4 <- mean((as.vector(test)-final_test_set_forecasted_values4)^2)
+print(apse_residual_model4)
+
+```
+
+
+
+
+
+Calulating the APSE value for Model 6 using the train/test APSE criterion method.
+
+```{r, echo = FALSE}
+# SARIMA(5,0,0)x(1,1,1)_12
+# predict 12 months ahead using the training set 
+predict.des <- predict(hw.ad.train.des, n.ahead = length(test), prediction.interval = T, level = 0.95)
+
+
+fore_residuals6  <- sarima.for(res_time_series,n.ahead = length(test), p = 5, d = 0, q = 0, P = 1, D = 1, Q = 1, S = 12)
+
+
+final_test_set_forecasted_values6 <- predict.des + as.vector(fore_residuals6$pred)
+
+# APSE
+apse_residual_model6 <- mean((as.vector(test)-final_test_set_forecasted_values6)^2)
+print(apse_residual_model6)
+
+```
+
+
+
+```{r, echo = FALSE}
+# storing all the APSE values in a vector
+APSE <- c(apse_residual_model1, apse_residual_model2, apse_residual_model3, apse_residual_model4, apse_residual_model6)
+x_axis <- c(1,2,3,4,6)
+
+plot(x_axis, APSE, xlab = "Model Number" , main = "APSE values of SARIMA Models")
+abline(v=which.min(APSE), col="red", lty=2)
+
+mtext("Fig 100: APSE values of Combination HW SARIMA models", side=1, line=4, cex=0.8)
+```
+
+Model 1 gives us the smallest value for APSE out of the proposed SARIMA models as can be seen in Figure 100, therefore for using SARIMA on differenced Holt-Winters residuals, I would recommend the $SARIMA(0,0,5)\times(0,1,1)_{12}$ model. However, the APSE for this SARIMA model does not outperform the SARIMA model used for combination methods using the residuals of regression, so we will not use it for forecasting purposes.
+
+
+
+
